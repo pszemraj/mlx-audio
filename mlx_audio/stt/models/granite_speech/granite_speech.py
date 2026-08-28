@@ -95,7 +95,33 @@ def _parse_timestamps(text: str) -> List[dict]:
     ]
 
 
-def _parse_segments(task: str, text: str) -> List[dict]:
+def _resolve_prompt(task: str, prompt: Optional[str], language: Optional[str]) -> str:
+    # Priority: explicit prompt > rich-transcription task > translation via
+    # language > default ASR. The CLI always passes language (default "en"),
+    # so a non-asr task must not be overridden by it.
+    if task not in TASK_PROMPTS:
+        raise ValueError(
+            f"Unknown task {task!r}; expected one of {sorted(TASK_PROMPTS)}"
+        )
+    if prompt is not None:
+        return prompt
+    if task != "asr":
+        return TASK_PROMPTS[task]
+    if language is not None:
+        lang_name = LANGUAGE_CODES.get(language.lower(), language)
+        return f"Translate the speech to {lang_name}."
+    return TASK_PROMPTS["asr"]
+
+
+def _parse_segments(
+    task: str, text: str, prefix_text: Optional[str] = None
+) -> List[dict]:
+    if task == "saa" and prefix_text and not _SPEAKER_RE.match(text.lstrip()):
+        # A continuation that starts mid-turn carries no tag of its own; it
+        # belongs to the last speaker in the prefix.
+        tags = _SPEAKER_RE.findall(prefix_text)
+        if tags:
+            text = f"[Speaker {tags[-1]}]: {text}"
     parser = {"saa": _parse_saa, "timestamps": _parse_timestamps}.get(task)
     return parser(text) if parser else []
 
@@ -751,22 +777,13 @@ class Model(nn.Module):
     ) -> Union[STTOutput, Generator[StreamingResult, None, None]]:
         from mlx_audio.stt.utils import merge_hotwords
 
-        if task not in TASK_PROMPTS:
-            raise ValueError(
-                f"Unknown task {task!r}; expected one of {sorted(TASK_PROMPTS)}"
-            )
+        prompt = _resolve_prompt(task, prompt, language)
         if task != "asr" and not self.is_plus:
             print(
                 f"[WARNING] task={task!r} needs a granite_speech_plus checkpoint; "
                 f"{self.config.model_type} will silently fall back to plain "
                 "transcription."
             )
-
-        if prompt is None and language is not None:
-            lang_name = LANGUAGE_CODES.get(language.lower(), language)
-            prompt = f"Translate the speech to {lang_name}."
-        if prompt is None:
-            prompt = TASK_PROMPTS[task]
 
         # Granite biases toward rare vocabulary via an inline "Keywords:" clause.
         keywords = merge_hotwords(None, hotwords)
@@ -852,7 +869,7 @@ class Model(nn.Module):
 
         return STTOutput(
             text=text,
-            segments=_parse_segments(task, text),
+            segments=_parse_segments(task, text, prefix_text),
             prompt_tokens=prompt_tokens,
             generation_tokens=gen_tokens,
             total_tokens=prompt_tokens + gen_tokens,

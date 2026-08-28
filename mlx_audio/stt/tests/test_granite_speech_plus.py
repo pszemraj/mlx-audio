@@ -28,6 +28,7 @@ from mlx_audio.stt.models.granite_speech.granite_speech import (
     _parse_saa,
     _parse_segments,
     _parse_timestamps,
+    _resolve_prompt,
 )
 
 HIDDEN_DIM = 8
@@ -132,6 +133,25 @@ class TestOutputParsers:
         ]
         assert _parse_segments("timestamps", "hi [T:50]")[0]["end"] == 0.5
 
+    def test_untagged_saa_continuation_attributed_to_prefix_speaker(self):
+        # Mid-turn continuations carry no tag; they belong to the prefix's
+        # last speaker.
+        segments = _parse_segments(
+            "saa",
+            "and then the meeting ended",
+            prefix_text="[Speaker 1]: hello [Speaker 2]: hi there",
+        )
+        assert segments == [{"speaker_id": 2, "text": "and then the meeting ended"}]
+
+    def test_tagged_saa_continuation_ignores_prefix(self):
+        segments = _parse_segments(
+            "saa", "[Speaker 3]: new voice", prefix_text="[Speaker 1]: hello"
+        )
+        assert segments == [{"speaker_id": 3, "text": "new voice"}]
+
+    def test_saa_continuation_without_prefix_tags_unchanged(self):
+        assert _parse_segments("saa", "plain text", prefix_text="no tags here") == []
+
 
 # Enough of the plus chat template to exercise the native prefix_text hook and
 # the system-turn handling; the 4.0/4.1 template lacks the hook entirely.
@@ -214,6 +234,27 @@ class TestBuildPrompt:
 def test_generate_rejects_unknown_task():
     with pytest.raises(ValueError, match="Unknown task"):
         Model.generate(SimpleNamespace(), None, task="diarize")
+
+
+class TestResolvePrompt:
+    def test_explicit_prompt_wins(self):
+        assert _resolve_prompt("saa", "custom", "fr") == "custom"
+
+    def test_task_beats_cli_default_language(self):
+        # The CLI always passes language (default "en"); a rich-transcription
+        # task must not degrade into a translation prompt.
+        assert _resolve_prompt("saa", None, "en") == TASK_PROMPTS["saa"]
+        assert _resolve_prompt("timestamps", None, "en") == TASK_PROMPTS["timestamps"]
+
+    def test_asr_with_language_translates(self):
+        assert _resolve_prompt("asr", None, "fr") == "Translate the speech to French."
+
+    def test_asr_default(self):
+        assert _resolve_prompt("asr", None, None) == TASK_PROMPTS["asr"]
+
+    def test_unknown_task_raises(self):
+        with pytest.raises(ValueError, match="Unknown task"):
+            _resolve_prompt("diarize", None, None)
 
 
 class TestIsPlus:
