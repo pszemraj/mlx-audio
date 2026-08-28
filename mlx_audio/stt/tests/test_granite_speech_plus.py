@@ -1,0 +1,293 @@
+"""Weight-free tests for granite-speech-4.1-2b-plus support.
+
+The plus checkpoint concatenates intermediate Conformer layer outputs onto the
+final encoder output (``cat_hidden_layers``), adds a system turn and
+``prefix_text`` to the prompt, and emits ``[Speaker N]:`` / ``[T:N]`` tags that
+are parsed into the repo's ``segments`` schema. An optional parity test against
+``transformers`` runs only where torch is installed.
+"""
+
+from types import SimpleNamespace
+
+import mlx.core as mx
+import numpy as np
+import pytest
+
+from mlx_audio.stt.models.granite_speech.config import (
+    EncoderConfig,
+    ModelConfig,
+    ProjectorConfig,
+    TextConfig,
+)
+from mlx_audio.stt.models.granite_speech.granite_speech import (
+    PLUS_SYSTEM_PROMPT,
+    TASK_PROMPTS,
+    CTCEncoder,
+    EncoderProjector,
+    Model,
+    _parse_saa,
+    _parse_segments,
+    _parse_timestamps,
+)
+
+HIDDEN_DIM = 8
+
+
+def _tiny_encoder_config(**overrides):
+    params = dict(
+        input_dim=4,
+        num_layers=2,
+        hidden_dim=HIDDEN_DIM,
+        num_heads=2,
+        dim_head=4,
+        output_dim=4,
+        context_size=8,
+        max_pos_emb=16,
+    )
+    params.update(overrides)
+    return EncoderConfig(**params)
+
+
+class TestEncoderCatHiddenLayers:
+    def _run(self, cat_hidden_layers):
+        encoder = CTCEncoder(_tiny_encoder_config(cat_hidden_layers=cat_hidden_layers))
+        out = encoder(mx.zeros((1, 8, 4)))
+        mx.eval(out)
+        return out
+
+    def test_none_keeps_hidden_dim(self):
+        assert self._run(None).shape == (1, 8, HIDDEN_DIM)
+
+    def test_empty_list_keeps_hidden_dim(self):
+        assert self._run([]).shape == (1, 8, HIDDEN_DIM)
+
+    def test_single_layer_doubles_dim(self):
+        assert self._run([1]).shape == (1, 8, 2 * HIDDEN_DIM)
+
+    def test_layer_zero_exports_input_linear_output(self):
+        assert self._run([0, 1]).shape == (1, 8, 3 * HIDDEN_DIM)
+
+    def test_config_from_dict_keeps_cat_hidden_layers(self):
+        cfg = EncoderConfig.from_dict({"cat_hidden_layers": [3], "num_layers": 16})
+        assert cfg.cat_hidden_layers == [3]
+
+    def test_projector_consumes_concatenated_features(self):
+        config = ModelConfig(
+            encoder_config=_tiny_encoder_config(cat_hidden_layers=[1]),
+            projector_config=ProjectorConfig(
+                hidden_size=HIDDEN_DIM,
+                num_hidden_layers=1,
+                num_attention_heads=2,
+                intermediate_size=16,
+                encoder_hidden_size=2 * HIDDEN_DIM,
+            ),
+            text_config=TextConfig(hidden_size=12),
+        )
+        encoder = CTCEncoder(config.encoder_config)
+        projector = EncoderProjector(config)
+        out = projector(encoder(mx.zeros((1, 8, 4))))
+        mx.eval(out)
+        # 8 frames -> 1 window of 15 -> window_size // downsample_rate queries
+        num_queries = config.window_size // config.downsample_rate
+        assert out.shape == (1, num_queries, 12)
+
+
+class TestOutputParsers:
+    def test_parse_saa_card_example(self):
+        text = (
+            "[Speaker 1]: Hello how are you "
+            "[Speaker 2]: I'm fine and how are you feeling "
+            "[Speaker 1]: I feel wonderful"
+        )
+        segments = _parse_saa(text)
+        assert [s["speaker_id"] for s in segments] == [1, 2, 1]
+        assert segments[0]["text"] == "Hello how are you"
+        assert segments[2]["text"] == "I feel wonderful"
+        assert all("start" not in s for s in segments)
+
+    def test_parse_saa_untagged_text_yields_nothing(self):
+        assert _parse_saa("plain transcription without tags") == []
+
+    def test_parse_timestamps_rollover_and_silence(self):
+        segments = _parse_timestamps(
+            "hello [T:995] world [T:012] _ [T:100] again [T:150]"
+        )
+        assert len(segments) == 1
+        words = segments[0]["words"]
+        assert [w["word"] for w in words] == ["hello", "world", "again"]
+        assert [w["end"] for w in words] == pytest.approx([9.95, 10.12, 11.50])
+        # the dropped silence still advances the next word's start
+        assert words[2]["start"] == pytest.approx(11.00)
+        assert segments[0]["start"] == 0.0
+        assert segments[0]["end"] == pytest.approx(11.50)
+        assert segments[0]["text"] == "hello world again"
+
+    def test_parse_timestamps_untagged_text_yields_nothing(self):
+        assert _parse_timestamps("no tags here") == []
+
+    def test_parse_segments_dispatch(self):
+        assert _parse_segments("asr", "[Speaker 1]: hi") == []
+        assert _parse_segments("saa", "[Speaker 1]: hi") == [
+            {"speaker_id": 1, "text": "hi"}
+        ]
+        assert _parse_segments("timestamps", "hi [T:50]")[0]["end"] == 0.5
+
+
+# Enough of the plus chat template to exercise the native prefix_text hook and
+# the system-turn handling; the 4.0/4.1 template lacks the hook entirely.
+PLUS_TEMPLATE_TAIL = (
+    "{%- if add_generation_prompt %}{{- '<|start_of_role|>assistant<|end_of_role|>' }}"
+    "{%- if prefix_text is defined and prefix_text %}{{- prefix_text }}{%- endif %}"
+    "{%- endif %}"
+)
+LEGACY_TEMPLATE = "{{ messages }}<|start_of_role|>assistant<|end_of_role|>"
+
+
+class StubTokenizer:
+    """Records what _build_prompt renders; mimics the template contract only."""
+
+    def __init__(self, chat_template=None):
+        if chat_template is not None:
+            self.chat_template = chat_template
+        self.last_prompt = None
+
+    def apply_chat_template(
+        self, chat, tokenize=False, add_generation_prompt=True, **kwargs
+    ):
+        parts = [
+            f"<|start_of_role|>{m['role']}<|end_of_role|>{m['content']}<|end_of_text|>\n"
+            for m in chat
+        ]
+        if add_generation_prompt:
+            parts.append("<|start_of_role|>assistant<|end_of_role|>")
+            if "prefix_text" in self.chat_template and kwargs.get("prefix_text"):
+                parts.append(kwargs["prefix_text"])
+        return "".join(parts)
+
+    def encode(self, text):
+        self.last_prompt = text
+        return [0]
+
+
+def _build_prompt(tokenizer, num_audio_tokens=2, prompt="do the thing", **kwargs):
+    stub_model = SimpleNamespace(_tokenizer=tokenizer)
+    Model._build_prompt(stub_model, num_audio_tokens, prompt, **kwargs)
+    return tokenizer.last_prompt
+
+
+class TestBuildPrompt:
+    def test_placeholder_space_and_user_turn(self):
+        tok = StubTokenizer(PLUS_TEMPLATE_TAIL)
+        rendered = _build_prompt(tok)
+        assert "<|audio|><|audio|> do the thing<|end_of_text|>" in rendered
+
+    def test_system_turn_inserted_first(self):
+        tok = StubTokenizer(PLUS_TEMPLATE_TAIL)
+        rendered = _build_prompt(tok, system_prompt=PLUS_SYSTEM_PROMPT)
+        assert rendered.startswith(
+            f"<|start_of_role|>system<|end_of_role|>{PLUS_SYSTEM_PROMPT}"
+        )
+
+    def test_native_prefix_text_not_double_appended(self):
+        tok = StubTokenizer(PLUS_TEMPLATE_TAIL)
+        rendered = _build_prompt(tok, prefix_text="[Speaker 1]: so far")
+        assert rendered.endswith("<|end_of_role|>[Speaker 1]: so far")
+        assert rendered.count("[Speaker 1]: so far") == 1
+
+    def test_manual_prefix_append_for_legacy_template(self):
+        tok = StubTokenizer(LEGACY_TEMPLATE)
+        rendered = _build_prompt(tok, prefix_text="prior text")
+        assert rendered.endswith("<|start_of_role|>assistant<|end_of_role|>prior text")
+
+    def test_no_template_fallback(self):
+        tok = StubTokenizer()
+        rendered = _build_prompt(tok, prefix_text="prior")
+        assert rendered == "USER: <|audio|><|audio|> do the thing\nASSISTANT:prior"
+
+    def test_default_prompt_is_asr_task(self):
+        tok = StubTokenizer(PLUS_TEMPLATE_TAIL)
+        stub_model = SimpleNamespace(_tokenizer=tok)
+        Model._build_prompt(stub_model, 1, None)
+        assert TASK_PROMPTS["asr"] in tok.last_prompt
+
+
+def test_generate_rejects_unknown_task():
+    with pytest.raises(ValueError, match="Unknown task"):
+        Model.generate(SimpleNamespace(), None, task="diarize")
+
+
+class TestIsPlus:
+    def _is_plus(self, config):
+        return Model.is_plus.fget(SimpleNamespace(config=config))
+
+    def test_by_model_type(self):
+        assert self._is_plus(ModelConfig(model_type="granite_speech_plus"))
+
+    def test_by_cat_hidden_layers_after_conversion(self):
+        # mlx_audio.convert rewrites model_type to "granite_speech"; the
+        # architectural fingerprint must still identify the plus variant.
+        config = ModelConfig(
+            model_type="granite_speech",
+            encoder_config={"cat_hidden_layers": [3]},
+        )
+        assert self._is_plus(config)
+
+    def test_non_plus(self):
+        assert not self._is_plus(ModelConfig())
+
+
+def test_encoder_parity_with_transformers_plus():
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("transformers")
+    try:
+        from transformers.models.granite_speech_plus import (
+            modeling_granite_speech_plus as hf_mod,
+        )
+    except ImportError:
+        pytest.skip("transformers build lacks granite_speech_plus")
+
+    hf_config_cls = getattr(hf_mod, "GraniteSpeechPlusEncoderConfig", None)
+    if hf_config_cls is None:
+        from transformers.models.granite_speech_plus import (
+            configuration_granite_speech_plus as hf_cfg_mod,
+        )
+
+        hf_config_cls = hf_cfg_mod.GraniteSpeechPlusEncoderConfig
+
+    params = dict(
+        input_dim=4,
+        num_layers=2,
+        hidden_dim=HIDDEN_DIM,
+        feedforward_mult=2,
+        num_heads=2,
+        dim_head=4,
+        output_dim=4,
+        context_size=8,
+        max_pos_emb=16,
+        dropout=0.0,
+        conv_kernel_size=5,
+        conv_expansion_factor=2,
+        cat_hidden_layers=[1],
+    )
+    hf_encoder = hf_mod.GraniteSpeechPlusCTCEncoder(hf_config_cls(**params)).eval()
+    mlx_encoder = CTCEncoder(EncoderConfig(**params))
+
+    weights = {
+        f"encoder.{k}": mx.array(v.detach().numpy())
+        for k, v in hf_encoder.state_dict().items()
+    }
+    weights = Model.sanitize(weights)
+    mlx_encoder.load_weights(
+        [(k.removeprefix("encoder."), v) for k, v in weights.items()], strict=True
+    )
+
+    x = np.random.default_rng(0).standard_normal((1, 8, 4)).astype(np.float32)
+    with torch.no_grad():
+        hf_out = hf_encoder(torch.from_numpy(x))
+    if hasattr(hf_out, "last_hidden_state"):
+        hf_out = hf_out.last_hidden_state
+    mlx_out = mlx_encoder(mx.array(x))
+    mx.eval(mlx_out)
+
+    diff = np.max(np.abs(np.array(mlx_out) - hf_out.numpy()))
+    assert diff < 5e-4, f"encoder outputs diverge: max abs diff {diff}"
