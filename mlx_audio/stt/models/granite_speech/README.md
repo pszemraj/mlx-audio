@@ -1,14 +1,15 @@
 # Granite Speech
 
-MLX implementation of IBM's Granite Speech, a speech-to-text model that combines a CTC Conformer encoder with a Granite LLM decoder via a BLIP-2 QFormer projector. Supports ASR (transcription) and AST (speech translation).
+MLX implementation of IBM's Granite Speech, a speech-to-text model that combines a CTC Conformer encoder with a Granite LLM decoder via a BLIP-2 QFormer projector. Supports ASR (transcription), AST (speech translation), and — with the plus checkpoint — speaker-attributed ASR and word-level timestamps.
 
 ## Available Models
 
 | Model | Parameters | Description |
 |-------|------------|-------------|
 | [ibm-granite/granite-4.0-1b-speech](https://huggingface.co/ibm-granite/granite-4.0-1b-speech) | ~1B | Speech recognition and translation |
+| [ibm-granite/granite-speech-4.1-2b-plus](https://huggingface.co/ibm-granite/granite-speech-4.1-2b-plus) | ~2B | Rich transcription: speaker attribution, word timestamps, keyword biasing (EN, FR, DE, ES, PT; no punctuation/casing) |
 
-**Supported Languages:** English, French, German, Spanish, Portuguese, Japanese
+**Supported Languages:** English, French, German, Spanish, Portuguese, Japanese (plus checkpoint: no Japanese)
 
 ## CLI Usage
 
@@ -77,6 +78,51 @@ print(result.text)
 ```
 
 > **Note:** If the model receives an unfamiliar prompt, it falls back to transcription as the default mode.
+
+### Rich Transcription (granite-speech-4.1-2b-plus)
+
+The plus checkpoint selects its mode through the prompt; the `task` parameter picks the right one. Audio limits from the model card: up to 9 minutes for `asr`/`saa`, up to 3.5 minutes for `timestamps`. Timestamps mode emits roughly one tag per word, so budget `max_tokens` accordingly. Plus-mode transcripts have no punctuation or casing.
+
+```python
+from mlx_audio.stt import load
+
+model = load("ibm-granite/granite-speech-4.1-2b-plus")
+
+# Speaker-attributed ASR: [Speaker N]: tags, parsed into segments
+result = model.generate("meeting.wav", task="saa")
+for seg in result.segments:
+    print(f"Speaker {seg['speaker_id']}: {seg['text']}")
+
+# Word-level timestamps: [T:N] tags, parsed into one segment with word timings
+result = model.generate("audio.wav", task="timestamps", max_tokens=8192)
+for word in result.segments[0]["words"]:
+    print(f"{word['word']}\t{word['start']:.2f}-{word['end']:.2f}s")
+
+# Keyword biasing (names, technical terms) works with any task
+result = model.generate("audio.wav", hotwords=["Nativ", "QFormer"])
+```
+
+From the CLI, the plus-specific parameters go through `--gen-kwargs`:
+
+```bash
+mlx_audio.stt.generate --model ibm-granite/granite-speech-4.1-2b-plus \
+  --audio meeting.wav --output-path output --format json \
+  --gen-kwargs '{"task": "saa", "hotwords": ["Acme Ledger", "Q3 close"]}'
+```
+
+#### Incremental decoding with `prefix_text`
+
+To transcribe a growing recording without re-decoding earlier segments, pass the previous transcript as `prefix_text`. The model continues after it, and SAA speaker numbering carries over:
+
+```python
+previous_text = None
+accumulated = None
+for chunk in chunks:                      # 16 kHz float32 mono
+    accumulated = chunk if accumulated is None else np.concatenate([accumulated, chunk])
+    out = model.generate(accumulated, task="saa", prefix_text=previous_text)
+    print(out.text)                       # continuation only
+    previous_text = (previous_text or "") + " " + out.text
+```
 
 ### Streaming
 
