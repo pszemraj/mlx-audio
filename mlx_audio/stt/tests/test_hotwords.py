@@ -40,6 +40,7 @@ _NATIVE_FIELD = {
     "whisper/whisper.py": "initial_prompt",
     "vibevoice_asr/vibevoice_asr.py": "context",
     "moss_transcribe_diarize/moss_transcribe_diarize.py": "prompt",
+    "granite_speech/granite_speech.py": "prompt",
 }
 
 _MODELS_DIR = Path(__file__).resolve().parents[1] / "models"

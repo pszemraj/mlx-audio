@@ -1,4 +1,5 @@
 import math
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +25,79 @@ LANGUAGE_CODES = {
     "pt": "Portuguese",
     "ja": "Japanese",
 }
+
+# Verbatim from the granite-speech-4.1-2b-plus model card. IBM's reference code
+# sends this system turn; without one the plus chat template substitutes a
+# generic assistant message the model was not trained against.
+PLUS_SYSTEM_PROMPT = (
+    "Knowledge Cutoff Date: April 2024.\nToday's Date: December 19, 2024.\n"
+    "You are Granite, developed by IBM. You are a helpful AI assistant"
+)
+
+# Task prompts verbatim from the model card. An unfamiliar or malformed prompt
+# makes the model silently fall back to plain transcription, so these must not
+# be reworded.
+TASK_PROMPTS = {
+    "asr": "can you transcribe the speech into a written format?",
+    "saa": (
+        "Speaker attribution: Transcribe and denote who is speaking by adding "
+        "[Speaker 1]: and [Speaker 2]: tags before speaker turns."
+    ),
+    "timestamps": (
+        "Timestamps: Transcribe the speech. After each word, add a timestamp tag "
+        "showing the end time in centiseconds, e.g. hello [T:45] world [T:82]"
+    ),
+}
+
+_SPEAKER_RE = re.compile(r"\[Speaker (\d+)\]:")
+_TS_RE = re.compile(r"\[T:(\d{1,3})\]")
+
+
+def _parse_saa(text: str) -> List[dict]:
+    parts = _SPEAKER_RE.split(text)
+    segments = []
+    for spk, body in zip(parts[1::2], parts[2::2]):
+        if body.strip():
+            segments.append({"speaker_id": int(spk), "text": body.strip()})
+    return segments
+
+
+def _parse_timestamps(text: str) -> List[dict]:
+    # Tags carry only the last three digits of centiseconds, so they roll over
+    # every 10 s: t = N/100 + 10*R. A tag smaller than its predecessor signals a
+    # rollover. A single tagged span longer than 10 s would alias by one
+    # rollover; that limit is inherent to the tag format.
+    parts = _TS_RE.split(text)
+    words = []
+    rollover = 0
+    prev = -1
+    cursor = 0.0
+    for tok, n in zip(parts[0::2], parts[1::2]):
+        n = int(n)
+        if n < prev:
+            rollover += 1
+        prev = n
+        end = n / 100 + 10 * rollover
+        tok = tok.strip()
+        # "_" is a tagged silence: advance the cursor without emitting a word.
+        if tok and tok != "_":
+            words.append({"word": tok, "start": cursor, "end": end})
+        cursor = end
+    if not words:
+        return []
+    return [
+        {
+            "text": " ".join(w["word"] for w in words),
+            "start": words[0]["start"],
+            "end": words[-1]["end"],
+            "words": words,
+        }
+    ]
+
+
+def _parse_segments(task: str, text: str) -> List[dict]:
+    parser = {"saa": _parse_saa, "timestamps": _parse_timestamps}.get(task)
+    return parser(text) if parser else []
 
 
 @dataclass
@@ -447,6 +521,15 @@ class Model(nn.Module):
     def layers(self):
         return self.language_model.model.layers
 
+    @property
+    def is_plus(self) -> bool:
+        # mlx_audio.convert rewrites model_type to the module name
+        # ("granite_speech"), so detect the plus variant by its architectural
+        # fingerprint, which survives conversion.
+        return self.config.model_type == "granite_speech_plus" or bool(
+            self.config.encoder_config.cat_hidden_layers
+        )
+
     def make_cache(self) -> List[KVCache]:
         return [KVCache() for _ in range(len(self.layers))]
 
@@ -590,20 +673,35 @@ class Model(nn.Module):
         self,
         num_audio_tokens: int,
         user_prompt: str = None,
+        *,
+        system_prompt: Optional[str] = None,
+        prefix_text: Optional[str] = None,
     ) -> mx.array:
         if user_prompt is None:
-            user_prompt = "can you transcribe the speech into a written format?"
+            user_prompt = TASK_PROMPTS["asr"]
 
+        # HF's reference prompts put a space between the audio placeholder and
+        # the instruction ("<|audio|> can you transcribe...").
         audio_placeholder = "<|audio|>" * num_audio_tokens
-        content = f"{audio_placeholder}{user_prompt}"
+        content = f"{audio_placeholder} {user_prompt.lstrip()}"
 
-        if getattr(self._tokenizer, "chat_template", None):
+        template = getattr(self._tokenizer, "chat_template", None)
+        if template:
             chat = [{"role": "user", "content": content}]
+            if system_prompt:
+                chat.insert(0, {"role": "system", "content": system_prompt})
+            # The plus template appends prefix_text right after the assistant
+            # generation prompt; the 4.0/4.1 templates have no such hook, so
+            # append by hand for them.
+            native_prefix = bool(prefix_text) and "prefix_text" in template
+            extra = {"prefix_text": prefix_text} if native_prefix else {}
             prompt_str = self._tokenizer.apply_chat_template(
-                chat, tokenize=False, add_generation_prompt=True
+                chat, tokenize=False, add_generation_prompt=True, **extra
             )
+            if prefix_text and not native_prefix:
+                prompt_str += prefix_text
         else:
-            prompt_str = f"USER: {content}\nASSISTANT:"
+            prompt_str = f"USER: {content}\nASSISTANT:{prefix_text or ''}"
 
         prompt_ids = self._tokenizer.encode(prompt_str)
 
@@ -640,16 +738,43 @@ class Model(nn.Module):
         min_p: float = 0.0,
         repetition_penalty: Optional[float] = None,
         repetition_context_size: int = 100,
+        task: str = "asr",
         prompt: str = None,
         language: str = None,
+        system_prompt: Optional[str] = None,
+        prefix_text: Optional[str] = None,
+        hotwords: Optional[List[str]] = None,
         prefill_step_size: int = 2048,
         verbose: bool = False,
         stream: bool = False,
         **kwargs,
     ) -> Union[STTOutput, Generator[StreamingResult, None, None]]:
+        from mlx_audio.stt.utils import merge_hotwords
+
+        if task not in TASK_PROMPTS:
+            raise ValueError(
+                f"Unknown task {task!r}; expected one of {sorted(TASK_PROMPTS)}"
+            )
+        if task != "asr" and not self.is_plus:
+            print(
+                f"[WARNING] task={task!r} needs a granite_speech_plus checkpoint; "
+                f"{self.config.model_type} will silently fall back to plain "
+                "transcription."
+            )
+
         if prompt is None and language is not None:
             lang_name = LANGUAGE_CODES.get(language.lower(), language)
             prompt = f"Translate the speech to {lang_name}."
+        if prompt is None:
+            prompt = TASK_PROMPTS[task]
+
+        # Granite biases toward rare vocabulary via an inline "Keywords:" clause.
+        keywords = merge_hotwords(None, hotwords)
+        if keywords:
+            prompt = f"{prompt} Keywords: {keywords}"
+
+        if system_prompt is None and self.is_plus:
+            system_prompt = PLUS_SYSTEM_PROMPT
 
         if stream:
             return self._stream_generate(
@@ -662,6 +787,8 @@ class Model(nn.Module):
                 repetition_penalty=repetition_penalty,
                 repetition_context_size=repetition_context_size,
                 prompt=prompt,
+                system_prompt=system_prompt,
+                prefix_text=prefix_text,
                 prefill_step_size=prefill_step_size,
                 verbose=verbose,
             )
@@ -679,7 +806,12 @@ class Model(nn.Module):
         audio_features = self.get_audio_features(input_features)
         mx.eval(audio_features)
 
-        prompt_ids = self._build_prompt(num_audio_tokens, prompt)
+        prompt_ids = self._build_prompt(
+            num_audio_tokens,
+            prompt,
+            system_prompt=system_prompt,
+            prefix_text=prefix_text,
+        )
         inputs_embeds = self._build_inputs_embeds(prompt_ids, audio_features)
         mx.eval(inputs_embeds)
 
@@ -720,7 +852,7 @@ class Model(nn.Module):
 
         return STTOutput(
             text=text,
-            segments=[],
+            segments=_parse_segments(task, text),
             prompt_tokens=prompt_tokens,
             generation_tokens=gen_tokens,
             total_tokens=prompt_tokens + gen_tokens,
@@ -741,6 +873,8 @@ class Model(nn.Module):
         repetition_penalty: Optional[float] = None,
         repetition_context_size: int = 100,
         prompt: str = None,
+        system_prompt: Optional[str] = None,
+        prefix_text: Optional[str] = None,
         prefill_step_size: int = 2048,
         verbose: bool = False,
     ) -> Generator[StreamingResult, None, None]:
@@ -753,7 +887,12 @@ class Model(nn.Module):
         audio_features = self.get_audio_features(input_features)
         mx.eval(audio_features)
 
-        prompt_ids = self._build_prompt(num_audio_tokens, prompt)
+        prompt_ids = self._build_prompt(
+            num_audio_tokens,
+            prompt,
+            system_prompt=system_prompt,
+            prefix_text=prefix_text,
+        )
         inputs_embeds = self._build_inputs_embeds(prompt_ids, audio_features)
         mx.eval(inputs_embeds)
 
