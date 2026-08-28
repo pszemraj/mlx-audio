@@ -224,11 +224,18 @@ class CTCEncoder(nn.Module):
 
     def __call__(self, x: mx.array) -> mx.array:
         x = self.input_linear(x)
+        cat_layers = set(self.config.cat_hidden_layers or ())
+        exported = [x] if 0 in cat_layers else []
         for idx, layer in enumerate(self.layers, start=1):
             x = layer(x, attention_dists=self._attention_dists)
+            # HF exports the hidden state before the mid-layer CTC injection.
+            if idx in cat_layers:
+                exported.append(x)
             if idx == self.num_layers // 2:
                 x_mid = self.out(x)
                 x = x + self.out_mid(mx.softmax(x_mid, axis=-1))
+        if exported:
+            x = mx.concatenate([*exported, x], axis=-1)
         return x
 
 
