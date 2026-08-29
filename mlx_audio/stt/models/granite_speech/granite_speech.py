@@ -63,7 +63,7 @@ def _parse_saa(text: str) -> List[dict]:
     return segments
 
 
-def _parse_timestamps(text: str) -> List[dict]:
+def _parse_timestamps(text: str, prefix_text: Optional[str] = None) -> List[dict]:
     # Tags carry only the last three digits of centiseconds, so they roll over
     # every 10 s: t = N/100 + 10*R. A tag smaller than its predecessor signals a
     # rollover. A single tagged span longer than 10 s would alias by one
@@ -73,6 +73,13 @@ def _parse_timestamps(text: str) -> List[dict]:
     rollover = 0
     prev = -1
     cursor = 0.0
+    for n in _TS_RE.findall(prefix_text or ""):
+        n = int(n)
+        if n < prev:
+            rollover += 1
+        prev = n
+        cursor = n / 100 + 10 * rollover
+
     for tok, n in zip(parts[0::2], parts[1::2]):
         n = int(n)
         if n < prev:
@@ -117,14 +124,17 @@ def _resolve_prompt(task: str, prompt: Optional[str], language: Optional[str]) -
 def _parse_segments(
     task: str, text: str, prefix_text: Optional[str] = None
 ) -> List[dict]:
-    if task == "saa" and prefix_text and not _SPEAKER_RE.match(text.lstrip()):
-        # A continuation that starts mid-turn carries no tag of its own; it
-        # belongs to the last speaker in the prefix.
-        tags = _SPEAKER_RE.findall(prefix_text)
-        if tags:
-            text = f"[Speaker {tags[-1]}]: {text}"
-    parser = {"saa": _parse_saa, "timestamps": _parse_timestamps}.get(task)
-    return parser(text) if parser else []
+    if task == "saa":
+        if prefix_text and not _SPEAKER_RE.match(text.lstrip()):
+            # A continuation that starts mid-turn carries no tag of its own;
+            # it belongs to the last speaker in the prefix.
+            tags = _SPEAKER_RE.findall(prefix_text)
+            if tags:
+                text = f"[Speaker {tags[-1]}]: {text}"
+        return _parse_saa(text)
+    if task == "timestamps":
+        return _parse_timestamps(text, prefix_text)
+    return []
 
 
 @dataclass

@@ -127,6 +127,27 @@ class TestOutputParsers:
     def test_parse_timestamps_untagged_text_yields_nothing(self):
         assert _parse_timestamps("no tags here") == []
 
+    def test_timestamp_continuation_inherits_prefix_clock(self):
+        segments = _parse_segments(
+            "timestamps",
+            "continued [T:012]",
+            prefix_text="first [T:995] second [T:012] third [T:995]",
+        )
+        assert segments == [
+            {
+                "text": "continued",
+                "start": pytest.approx(19.95),
+                "end": pytest.approx(20.12),
+                "words": [
+                    {
+                        "word": "continued",
+                        "start": pytest.approx(19.95),
+                        "end": pytest.approx(20.12),
+                    }
+                ],
+            }
+        ]
+
     def test_timestamp_segments_yield_only_word_level_cues(self):
         output = SimpleNamespace(
             segments=_parse_timestamps("hello [T:50] world [T:100]")
