@@ -143,11 +143,12 @@ def _parse_segments(
 class StreamingResult:
     text: str
     is_final: bool
-    start_time: float
-    end_time: float
+    start_time: Optional[float]
+    end_time: Optional[float]
     language: str = "en"
     prompt_tokens: int = 0
     generation_tokens: int = 0
+    segments: Optional[List[dict]] = None
 
 
 class BatchNorm1d(nn.Module):
@@ -828,6 +829,7 @@ class Model(nn.Module):
                 min_p=min_p,
                 repetition_penalty=repetition_penalty,
                 repetition_context_size=repetition_context_size,
+                task=task,
                 prompt=prompt,
                 system_prompt=system_prompt,
                 prefix_text=prefix_text,
@@ -915,6 +917,7 @@ class Model(nn.Module):
         min_p: float = 0.0,
         repetition_penalty: Optional[float] = None,
         repetition_context_size: int = 100,
+        task: str = "asr",
         prompt: str = None,
         system_prompt: Optional[str] = None,
         prefix_text: Optional[str] = None,
@@ -971,20 +974,24 @@ class Model(nn.Module):
                 yield StreamingResult(
                     text=text,
                     is_final=False,
-                    start_time=0.0,
-                    end_time=0.0,
+                    start_time=None,
+                    end_time=None,
                     prompt_tokens=prompt_token_count,
                     generation_tokens=gen_tokens,
                 )
 
         detokenizer.finalize()
+        full_text = detokenizer.text
         yield StreamingResult(
             text=detokenizer.last_segment,
             is_final=True,
-            start_time=0.0,
-            end_time=0.0,
+            start_time=None,
+            end_time=None,
             prompt_tokens=prompt_token_count,
             generation_tokens=gen_tokens,
+            segments=(
+                _parse_segments(task, full_text, prefix_text) if task != "asr" else None
+            ),
         )
 
     def _load_audio(

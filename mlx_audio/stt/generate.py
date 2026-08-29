@@ -142,7 +142,12 @@ def _get_cues(segments):
         if "words" in s and s["words"]:
             for w in s["words"]:
                 cues.append({"start": w["start"], "end": w["end"], "text": w["word"]})
-        elif "start" in s:
+        elif (
+            s.get("text")
+            and s.get("start") is not None
+            and s.get("end") is not None
+            and s["end"] > s["start"]
+        ):
             cues.append({"start": s["start"], "end": s["end"], "text": s["text"]})
         # Speaker-only segments (e.g. Granite SAA) carry neither word nor
         # segment timing, so they cannot produce cues.
@@ -302,23 +307,32 @@ def generate_transcription(
     kwargs = {k: v for k, v in kwargs.items() if k in signature.parameters}
 
     if kwargs.get("stream", False):
-        all_segments = []
+        timed_segments = []
+        structured_segments = None
         accumulated_text = ""
         language = "en"
         prompt_tokens = 0
         generation_tokens = 0
         for result in model.generate(audio, verbose=verbose, **kwargs):
-            segment_dict = {
-                "text": result.text,
-                "start": result.start_time,
-                "end": result.end_time,
-                "is_final": result.is_final,
-            }
+            result_segments = getattr(result, "segments", None)
+            if result_segments is not None:
+                structured_segments = result_segments
 
-            all_segments.append(segment_dict)
+            start = getattr(result, "start_time", None)
+            end = getattr(result, "end_time", None)
+            if result.text and start is not None and end is not None and end > start:
+                timed_segments.append(
+                    {
+                        "text": result.text,
+                        "start": start,
+                        "end": end,
+                        "is_final": result.is_final,
+                    }
+                )
+
             # Accumulate text (handles both incremental and cumulative streaming)
             accumulated_text += result.text
-            language = result.language
+            language = getattr(result, "language", language)
 
             # Extract token counts from results (final result has cumulative totals)
             if hasattr(result, "prompt_tokens") and result.prompt_tokens > 0:
@@ -330,7 +344,11 @@ def generate_transcription(
         stream_duration = stream_end_time - start_time
         segments = STTOutput(
             text=accumulated_text.strip(),
-            segments=all_segments,
+            segments=(
+                structured_segments
+                if structured_segments is not None
+                else timed_segments
+            ),
             language=language,
             prompt_tokens=prompt_tokens,
             generation_tokens=generation_tokens,

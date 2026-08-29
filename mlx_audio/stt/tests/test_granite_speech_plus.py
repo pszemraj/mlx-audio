@@ -26,6 +26,7 @@ from mlx_audio.stt.models.granite_speech.granite_speech import (
     CTCEncoder,
     EncoderProjector,
     Model,
+    StreamingResult,
     _parse_saa,
     _parse_segments,
     _parse_timestamps,
@@ -442,6 +443,112 @@ def test_stream_generation_forwards_sample_rate():
 
     assert list(result) == []
     assert forwarded["sample_rate"] == 48000
+    assert forwarded["task"] == "asr"
+
+
+@pytest.mark.parametrize(
+    ("task", "pieces", "expected_segments"),
+    [
+        (
+            "saa",
+            {10: "[Speaker 1]: ", 11: "hello"},
+            [{"speaker_id": 1, "text": "hello"}],
+        ),
+        (
+            "timestamps",
+            {10: "hello ", 11: "[T:50]"},
+            [
+                {
+                    "text": "hello",
+                    "start": 0.0,
+                    "end": 0.5,
+                    "words": [{"word": "hello", "start": 0.0, "end": 0.5}],
+                }
+            ],
+        ),
+    ],
+)
+def test_stream_final_result_carries_parsed_segments(
+    monkeypatch, task, pieces, expected_segments
+):
+    import mlx_audio.lm.generate as lm_generate
+
+    class SequenceTokenizer:
+        eos_token_id = 99
+        clean_up_tokenization_spaces = False
+
+        def decode(self, token_ids, **kwargs):
+            del kwargs
+            return "".join(pieces[token_id] for token_id in token_ids)
+
+    def fake_generate_step(**kwargs):
+        del kwargs
+        yield 10, None
+        yield 11, None
+        yield 99, None
+
+    monkeypatch.setattr(lm_generate, "generate_step", fake_generate_step)
+    stub_model = SimpleNamespace(
+        _tokenizer=SequenceTokenizer(),
+        _load_audio=lambda audio, sample_rate: audio,
+        _extract_features=lambda audio: (mx.zeros((1, 1, 160)), 1),
+        get_audio_features=lambda features: mx.zeros((1, 1, 4)),
+        _build_prompt=lambda *args, **kwargs: mx.array([0]),
+        _build_inputs_embeds=lambda *args, **kwargs: mx.zeros((1, 1, 4)),
+    )
+
+    results = list(Model._stream_generate(stub_model, mx.zeros((1,)), task=task))
+
+    assert "".join(result.text for result in results) == "".join(pieces.values())
+    assert all(result.start_time is None for result in results)
+    assert all(result.end_time is None for result in results)
+    assert results[-1].is_final
+    assert results[-1].segments == expected_segments
+
+
+def test_streamed_timestamp_cli_uses_final_structured_segments(tmp_path):
+    parsed = _parse_timestamps("hello [T:50]")
+
+    def generate(audio, *, stream=False, verbose=False):
+        del audio, stream, verbose
+        yield StreamingResult("hello ", False, None, None)
+        yield StreamingResult("[T:50]", False, None, None)
+        yield StreamingResult("", True, None, None, segments=parsed)
+
+    output_path = tmp_path / "timestamped"
+    generate_transcription(
+        model=SimpleNamespace(generate=generate),
+        audio=mx.zeros((1,)),
+        output_path=str(output_path),
+        format="srt",
+        stream=True,
+    )
+
+    subtitle = output_path.with_suffix(".srt").read_text()
+    assert subtitle.count("-->") == 1
+    assert "00:00:00,000 --> 00:00:00,500" in subtitle
+    assert "hello" in subtitle
+    assert "[T:50]" not in subtitle
+
+
+def test_untimed_stream_does_not_create_zero_duration_cues(tmp_path, capsys):
+    def generate(audio, *, stream=False, verbose=False):
+        del audio, stream, verbose
+        yield StreamingResult("hello", False, 0.0, 0.0)
+        yield StreamingResult("", True, 0.0, 0.0)
+
+    output_path = tmp_path / "untimed"
+    generate_transcription(
+        model=SimpleNamespace(generate=generate),
+        audio=mx.zeros((1,)),
+        output_path=str(output_path),
+        format="srt",
+        stream=True,
+    )
+
+    assert "No timed cues found" in capsys.readouterr().out
+    assert output_path.with_suffix(".txt").read_text() == "hello"
+    assert not output_path.with_suffix(".srt").exists()
 
 
 def test_encoder_parity_with_transformers_plus():
