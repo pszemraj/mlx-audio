@@ -148,6 +148,12 @@ audio inference. Each call re-extracts features, re-encodes all accumulated
 audio, and prefills a new decoder cache with `previous_transcript`, so cost grows
 with the cumulative recording length. Keep the accumulated input within the
 checkpoint's limits: 9 minutes for `asr`/`saa` and 3.5 minutes for `timestamps`.
+The prefix also consumes decoder context, so leave headroom rather than treating
+the published no-prefix audio limit as a safe incremental target. Shorter input
+increments provide more frequent speaker decisions, but do not bound total cost
+or context because both `all_audio` and `previous_transcript` still grow. For a
+longer recording, finish one bounded window and start another; speaker identities
+then need to be reconciled across windows by the caller.
 
 ### Streaming
 
