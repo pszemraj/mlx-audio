@@ -13,6 +13,7 @@ import mlx.core as mx
 import numpy as np
 import pytest
 
+from mlx_audio.stt.generate import _get_cues
 from mlx_audio.stt.models.granite_speech.config import (
     EncoderConfig,
     ModelConfig,
@@ -125,6 +126,15 @@ class TestOutputParsers:
 
     def test_parse_timestamps_untagged_text_yields_nothing(self):
         assert _parse_timestamps("no tags here") == []
+
+    def test_timestamp_segments_yield_only_word_level_cues(self):
+        output = SimpleNamespace(
+            segments=_parse_timestamps("hello [T:50] world [T:100]")
+        )
+        assert _get_cues(output) == [
+            {"start": 0.0, "end": 0.5, "text": "hello"},
+            {"start": 0.5, "end": 1.0, "text": "world"},
+        ]
 
     def test_parse_segments_dispatch(self):
         assert _parse_segments("asr", "[Speaker 1]: hi") == []

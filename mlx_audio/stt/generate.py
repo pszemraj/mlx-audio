@@ -136,14 +136,13 @@ def _get_cues(segments):
         ]
     cues = []
     for s in segments.segments:
-        # Speaker-only segments (e.g. Granite SAA) carry no timing, so they
-        # cannot produce cues.
-        if "start" not in s:
-            continue
-        cues.append({"start": s["start"], "end": s["end"], "text": s["text"]})
         if "words" in s and s["words"]:
             for w in s["words"]:
                 cues.append({"start": w["start"], "end": w["end"], "text": w["word"]})
+        elif "start" in s:
+            cues.append({"start": s["start"], "end": s["end"], "text": s["text"]})
+        # Speaker-only segments (e.g. Granite SAA) carry neither word nor
+        # segment timing, so they cannot produce cues.
     return cues
 
 
