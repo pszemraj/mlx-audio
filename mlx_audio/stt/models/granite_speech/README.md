@@ -110,19 +110,21 @@ mlx_audio.stt.generate --model ibm-granite/granite-speech-4.1-2b-plus \
   --gen-kwargs '{"task": "saa", "hotwords": ["Acme Ledger", "Q3 close"]}'
 ```
 
-#### Incremental decoding with `prefix_text`
+#### Continuation prompting with `prefix_text`
 
-To transcribe a growing recording without re-decoding earlier segments, pass the previous transcript as `prefix_text`. The model continues after it, and SAA speaker numbering carries over:
+`prefix_text` seeds the assistant response with an existing partial transcript so
+the model generates only its continuation. This is useful when resuming a bounded
+input after a token limit, and SAA speaker numbering carries over from the prefix:
 
 ```python
-previous_text = None
-accumulated = None
-for chunk in chunks:                      # 16 kHz float32 mono
-    accumulated = chunk if accumulated is None else np.concatenate([accumulated, chunk])
-    out = model.generate(accumulated, task="saa", prefix_text=previous_text)
-    print(out.text)                       # continuation only
-    previous_text = (previous_text or "") + " " + out.text
+partial_text = "[Speaker 1]: welcome everyone [Speaker 2]: thanks for having me"
+out = model.generate("meeting.wav", task="saa", prefix_text=partial_text)
+print(out.text)  # continuation only
 ```
+
+This is prompt continuation, not incremental audio inference. Every call
+re-extracts features, re-encodes all supplied audio, and prefills a new decoder
+cache. Do not repeatedly concatenate a growing recording into this API.
 
 ### Streaming
 
@@ -136,7 +138,9 @@ for result in model.generate("audio.wav", stream=True):
 ```
 
 For `saa` and `timestamps`, parsed segments are attached to the final streaming
-result. Token deltas are untimed; they are not word-alignment cues.
+result. Token deltas are untimed; they are not word-alignment cues. Granite
+encodes the complete supplied recording before yielding decoder tokens, so this
+mode does not provide online audio ingestion or reusable state across calls.
 
 ### Generation Parameters
 
