@@ -307,6 +307,28 @@ class TestSanitizeWeights:
         assert reloaded[key].shape == mlx_shape
 
 
+@pytest.mark.parametrize("encoder_dtype", [mx.float32, mx.bfloat16])
+def test_audio_features_match_loaded_encoder_dtype(encoder_dtype):
+    class RecordingEncoder:
+        def __init__(self):
+            self.input_linear = SimpleNamespace(
+                weight=mx.zeros((1,), dtype=encoder_dtype)
+            )
+            self.input_dtype = None
+
+        def __call__(self, features):
+            self.input_dtype = features.dtype
+            return features
+
+    encoder = RecordingEncoder()
+    stub_model = SimpleNamespace(encoder=encoder, projector=lambda features: features)
+
+    output = Model.get_audio_features(stub_model, mx.zeros((1, 2, 4), dtype=mx.float32))
+
+    assert encoder.input_dtype == encoder_dtype
+    assert output.dtype == encoder_dtype
+
+
 def test_encoder_parity_with_transformers_plus():
     torch = pytest.importorskip("torch")
     pytest.importorskip("transformers")

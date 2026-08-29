@@ -590,6 +590,9 @@ class Model(nn.Module):
         return logits / self.language_model.logits_scaling
 
     def get_audio_features(self, input_features: mx.array) -> mx.array:
+        encoder_dtype = self.encoder.input_linear.weight.dtype
+        if input_features.dtype != encoder_dtype:
+            input_features = input_features.astype(encoder_dtype)
         encoder_output = self.encoder(input_features)
         projected = self.projector(encoder_output)
         return projected
