@@ -110,6 +110,12 @@ class TestOutputParsers:
     def test_parse_saa_untagged_text_yields_nothing(self):
         assert _parse_saa("plain transcription without tags") == []
 
+    def test_parse_saa_preserves_leading_untagged_text(self):
+        assert _parse_saa("intro without attribution [Speaker 1]: tagged turn") == [
+            {"speaker_id": None, "text": "intro without attribution"},
+            {"speaker_id": 1, "text": "tagged turn"},
+        ]
+
     def test_parse_timestamps_rollover_and_silence(self):
         segments = _parse_timestamps(
             "hello [T:995] world [T:012] _ [T:100] again [T:150]"

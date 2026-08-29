@@ -57,6 +57,8 @@ _TS_RE = re.compile(r"\[T:(\d{1,3})\]")
 def _parse_saa(text: str) -> List[dict]:
     parts = _SPEAKER_RE.split(text)
     segments = []
+    if len(parts) > 1 and parts[0].strip():
+        segments.append({"speaker_id": None, "text": parts[0].strip()})
     for spk, body in zip(parts[1::2], parts[2::2]):
         if body.strip():
             segments.append({"speaker_id": int(spk), "text": body.strip()})
