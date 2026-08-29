@@ -110,21 +110,44 @@ mlx_audio.stt.generate --model ibm-granite/granite-speech-4.1-2b-plus \
   --gen-kwargs '{"task": "saa", "hotwords": ["Acme Ledger", "Q3 close"]}'
 ```
 
-#### Continuation prompting with `prefix_text`
+#### Incremental decoding with `prefix_text`
 
-`prefix_text` seeds the assistant response with an existing partial transcript so
-the model generates only its continuation. This is useful when resuming a bounded
-input after a token limit, and SAA speaker numbering carries over from the prefix:
+`prefix_text` seeds the assistant response with the transcript produced so far,
+so the model emits only the continuation. IBM's incremental-decoding recipe
+accumulates both the audio context and the transcript; in SAA mode, the prefix
+also gives the model the existing speaker numbering:
 
 ```python
-partial_text = "[Speaker 1]: welcome everyone [Speaker 2]: thanks for having me"
-out = model.generate("meeting.wav", task="saa", prefix_text=partial_text)
-print(out.text)  # continuation only
+import mlx.core as mx
+
+from mlx_audio.stt import load
+from mlx_audio.stt.utils import load_audio
+
+model = load("ibm-granite/granite-speech-4.1-2b-plus")
+previous_transcript = ""
+all_audio = None
+
+for path in ["meeting-000.wav", "meeting-001.wav", "meeting-002.wav"]:
+    new_audio = load_audio(path)  # mono, resampled to 16 kHz
+    all_audio = (
+        new_audio if all_audio is None else mx.concatenate([all_audio, new_audio])
+    )
+    result = model.generate(
+        all_audio,
+        task="saa",
+        prefix_text=previous_transcript or None,
+    )
+    print(result.text)  # only the newly decoded continuation
+    previous_transcript = f"{previous_transcript} {result.text}".strip()
+
+print(previous_transcript)  # complete transcript
 ```
 
-This is prompt continuation, not incremental audio inference. Every call
-re-extracts features, re-encodes all supplied audio, and prefills a new decoder
-cache. Do not repeatedly concatenate a growing recording into this API.
+This avoids generating the old transcript again, but it is not cached or online
+audio inference. Each call re-extracts features, re-encodes all accumulated
+audio, and prefills a new decoder cache with `previous_transcript`, so cost grows
+with the cumulative recording length. Keep the accumulated input within the
+checkpoint's limits: 9 minutes for `asr`/`saa` and 3.5 minutes for `timestamps`.
 
 ### Streaming
 
