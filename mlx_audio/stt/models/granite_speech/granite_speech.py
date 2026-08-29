@@ -145,7 +145,7 @@ class StreamingResult:
     is_final: bool
     start_time: Optional[float]
     end_time: Optional[float]
-    language: str = "en"
+    language: Optional[str] = None
     prompt_tokens: int = 0
     generation_tokens: int = 0
     segments: Optional[List[dict]] = None

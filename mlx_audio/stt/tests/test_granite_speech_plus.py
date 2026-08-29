@@ -637,6 +637,33 @@ def test_untimed_stream_does_not_create_zero_duration_cues(tmp_path, capsys):
     assert not output_path.with_suffix(".srt").exists()
 
 
+def test_streamed_cli_does_not_invent_english_language(tmp_path):
+    def generate(audio, *, stream=False, verbose=False):
+        del audio, stream, verbose
+        yield SimpleNamespace(
+            text="bonjour",
+            is_final=True,
+            start_time=None,
+            end_time=None,
+        )
+
+    output = generate_transcription(
+        model=SimpleNamespace(generate=generate),
+        audio=mx.zeros((1,)),
+        output_path=str(tmp_path / "unknown-language"),
+        format="txt",
+        stream=True,
+    )
+
+    assert output.language is None
+
+
+def test_granite_streaming_language_is_unknown_by_default():
+    result = StreamingResult("bonjour", True, None, None)
+
+    assert result.language is None
+
+
 def test_encoder_parity_with_transformers_plus():
     torch = pytest.importorskip("torch")
     pytest.importorskip("transformers")

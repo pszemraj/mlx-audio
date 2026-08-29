@@ -310,7 +310,7 @@ def generate_transcription(
         timed_segments = []
         structured_segments = None
         accumulated_text = ""
-        language = "en"
+        language = None
         prompt_tokens = 0
         generation_tokens = 0
         for result in model.generate(audio, verbose=verbose, **kwargs):
