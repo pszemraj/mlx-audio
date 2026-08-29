@@ -599,27 +599,27 @@ class Model(nn.Module):
 
     @staticmethod
     def sanitize(weights: Dict[str, mx.array]) -> Dict[str, mx.array]:
-        already_converted = any("scales" in k for k in weights)
-
         sanitized = {}
         for k, v in weights.items():
             if "num_batches_tracked" in k:
                 continue
 
             if (
-                not already_converted
-                and any(name in k for name in ["up_conv", "down_conv", "depth_conv"])
-                and "weight" in k
+                any(name in k for name in ["up_conv", "down_conv", "depth_conv"])
+                and k.endswith("weight")
                 and len(v.shape) == 3
             ):
                 # MLX Conv1d expects weights in (out_channels, kernel_size, in_channels)
                 # layout, while PyTorch uses (out_channels, in_channels, kernel_size).
-                # Models converted from PyTorch checkpoints need transposing; models
-                # already saved in MLX-native layout (e.g. bf16 safetensors) do not.
-                # depth_conv (kernel > 1) needs the shape heuristic to distinguish
-                # PyTorch (out, 1, kernel) from MLX (out, kernel, 1). up_conv and
-                # down_conv always use kernel_size=1, so they are always transposed.
-                if "depth_conv" not in k or v.shape[-1] > v.shape[-2]:
+                # Use each convolution's singleton dimension to distinguish those
+                # layouts, making sanitization safe both during conversion and when
+                # loading the resulting unquantized checkpoint.
+                is_pointwise = "up_conv" in k or "down_conv" in k
+                pytorch_pointwise = is_pointwise and v.shape[-1] == 1
+                pytorch_depthwise = (
+                    "depth_conv" in k and v.shape[1] == 1 and v.shape[-1] != 1
+                )
+                if pytorch_pointwise or pytorch_depthwise:
                     v = v.transpose(0, 2, 1)
 
             sanitized[k] = v
