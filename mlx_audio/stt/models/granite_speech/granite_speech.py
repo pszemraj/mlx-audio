@@ -803,6 +803,7 @@ class Model(nn.Module):
         system_prompt: Optional[str] = None,
         prefix_text: Optional[str] = None,
         hotwords: Optional[Union[str, List[str]]] = None,
+        word_timestamps: bool = False,
         prefill_step_size: int = 2048,
         verbose: bool = False,
         stream: bool = False,
@@ -810,6 +811,13 @@ class Model(nn.Module):
         **kwargs,
     ) -> Union[STTOutput, Generator[StreamingResult, None, None]]:
         from mlx_audio.stt.utils import merge_hotwords
+
+        if word_timestamps:
+            if task not in ("asr", "timestamps"):
+                raise ValueError(
+                    "word_timestamps=True conflicts with " f"task={task!r}"
+                )
+            task = "timestamps"
 
         prompt = _resolve_prompt(task, prompt, language)
         if task != "asr" and not self.is_plus:

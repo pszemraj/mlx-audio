@@ -361,6 +361,78 @@ def test_stt_transcriptions_default_format_preserves_ndjson(
         _json.loads(line)
 
 
+def test_stt_rich_transcription_fields_reach_model(client, mock_model_provider):
+    captured_kwargs = {}
+
+    def generate(
+        path,
+        *,
+        task=None,
+        prompt=None,
+        prefix_text=None,
+        hotwords=None,
+    ):
+        del path
+        captured_kwargs.update(
+            task=task,
+            prompt=prompt,
+            prefix_text=prefix_text,
+            hotwords=hotwords,
+        )
+        return {"text": "continuation", "segments": []}
+
+    mock_stt_model = MagicMock()
+    mock_stt_model.generate = generate
+    mock_model_provider.load_model = MagicMock(return_value=mock_stt_model)
+
+    response = client.post(
+        "/v1/audio/transcriptions",
+        files={"file": ("test.mp3", _make_transcription_audio_buffer(), "audio/mp3")},
+        data={
+            "model": "test_stt_model",
+            "response_format": "verbose_json",
+            "task": "saa",
+            "prompt": "custom rich prompt",
+            "prefix_text": "[Speaker 1]: earlier",
+            "hotwords": "QFormer",
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured_kwargs == {
+        "task": "saa",
+        "prompt": "custom rich prompt",
+        "prefix_text": "[Speaker 1]: earlier",
+        "hotwords": ["QFormer"],
+    }
+
+
+def test_stt_context_aliases_to_single_hotword(client, mock_model_provider):
+    captured_kwargs = {}
+
+    def generate(path, *, hotwords=None):
+        del path
+        captured_kwargs["hotwords"] = hotwords
+        return {"text": "transcript"}
+
+    mock_stt_model = MagicMock()
+    mock_stt_model.generate = generate
+    mock_model_provider.load_model = MagicMock(return_value=mock_stt_model)
+
+    response = client.post(
+        "/v1/audio/transcriptions",
+        files={"file": ("test.mp3", _make_transcription_audio_buffer(), "audio/mp3")},
+        data={
+            "model": "test_stt_model",
+            "response_format": "json",
+            "context": "Juniper",
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured_kwargs["hotwords"] == "Juniper"
+
+
 # ---------------------------------------------------------------------------
 # WebSocket realtime streaming tests
 # ---------------------------------------------------------------------------

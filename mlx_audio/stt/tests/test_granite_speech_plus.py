@@ -497,6 +497,41 @@ def test_stream_generation_forwards_sample_rate():
     assert forwarded["task"] == "asr"
 
 
+def test_word_timestamps_alias_selects_rich_timestamp_task():
+    forwarded = {}
+
+    def stream_generate(audio, **kwargs):
+        forwarded.update(kwargs)
+        return iter(())
+
+    stub_model = SimpleNamespace(
+        is_plus=True,
+        config=SimpleNamespace(model_type="granite_speech_plus"),
+        _stream_generate=stream_generate,
+    )
+
+    result = Model.generate(
+        stub_model,
+        mx.zeros((16000,)),
+        stream=True,
+        word_timestamps=True,
+    )
+
+    assert list(result) == []
+    assert forwarded["task"] == "timestamps"
+    assert forwarded["prompt"] == TASK_PROMPTS["timestamps"]
+
+
+def test_word_timestamps_alias_rejects_saa_conflict():
+    with pytest.raises(ValueError, match="conflicts"):
+        Model.generate(
+            SimpleNamespace(),
+            mx.zeros((16000,)),
+            task="saa",
+            word_timestamps=True,
+        )
+
+
 @pytest.mark.parametrize(
     ("task", "pieces", "expected_segments"),
     [

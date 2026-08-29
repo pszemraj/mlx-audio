@@ -189,6 +189,10 @@ class SpeechRequest(BaseModel):
 class TranscriptionRequest(BaseModel):
     model: str
     language: str | None = None
+    task: str | None = None
+    prompt: str | None = None
+    prefix_text: str | None = None
+    hotwords: str | List[str] | None = None
     verbose: bool = False
     max_tokens: int = 1024
     chunk_duration: float = 30.0
@@ -292,10 +296,25 @@ class STTExecutionAdapter(BaseModelExecutionAdapter):
                 exclude={"model"}, exclude_none=True
             )
             signature = inspect.signature(stt_model.generate)
+            generate_params = signature.parameters
+            if (
+                gen_kwargs.get("context")
+                and "context" not in generate_params
+                and "hotwords" in generate_params
+                and not gen_kwargs.get("hotwords")
+            ):
+                # ``context`` is the server's generic contextual-biasing field.
+                # Models with a structured hotword API receive it as one term.
+                gen_kwargs["hotwords"] = gen_kwargs["context"]
+            accepts_var_kwargs = any(
+                param.kind is inspect.Parameter.VAR_KEYWORD
+                for param in generate_params.values()
+            )
             gen_kwargs = {
                 key: value
                 for key, value in gen_kwargs.items()
-                if key in signature.parameters or key in _STT_EXTRA_KWARGS
+                if key in generate_params
+                or (key in _STT_EXTRA_KWARGS and accepts_var_kwargs)
             }
 
             result = stt_model.generate(tmp_path, **gen_kwargs)
@@ -1024,6 +1043,10 @@ async def stt_transcriptions(
     file: UploadFile = File(...),
     model: str = Form(...),
     language: Optional[str] = Form(None),
+    task: Optional[str] = Form(None),
+    prompt: Optional[str] = Form(None),
+    prefix_text: Optional[str] = Form(None),
+    hotwords: Optional[List[str]] = Form(None),
     verbose: bool = Form(False),
     max_tokens: int = Form(1024),
     chunk_duration: float = Form(30.0),
@@ -1056,6 +1079,10 @@ async def stt_transcriptions(
     payload = TranscriptionRequest(
         model=model,
         language=language,
+        task=task,
+        prompt=prompt,
+        prefix_text=prefix_text,
+        hotwords=hotwords,
         verbose=verbose,
         max_tokens=max_tokens,
         chunk_duration=chunk_duration,

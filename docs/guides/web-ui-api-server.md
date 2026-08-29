@@ -129,9 +129,14 @@ curl -X POST http://localhost:8000/v1/audio/transcriptions \
 | `file` | file | required | Audio file to transcribe |
 | `model` | string | required | STT model ID |
 | `language` | string | `null` | Language code |
+| `task` | string | `null` | Model-specific task, such as Granite Plus `saa` or `timestamps` |
+| `prompt` | string | `null` | Model-specific transcription prompt |
+| `prefix_text` | string | `null` | Prior transcript for models with incremental decoding |
+| `hotwords` | string/list | `null` | One or more contextual-biasing terms; repeat the form field for a list |
 | `max_tokens` | int | `1024` | Maximum output tokens |
 | `stream` | bool | `false` | Stream results as NDJSON |
 | `context` | string | `null` | Hotwords or metadata to guide transcription |
+| `word_timestamps` | bool | `false` | Request word timings; selects Granite Plus timestamp mode |
 | `verbose` | bool | `false` | Include extra details |
 
 ### Audio Source Separation
