@@ -177,6 +177,23 @@ ws://localhost:8000/v1/audio/transcriptions/realtime
 
 Send raw PCM frames as binary WebSocket messages; the server performs VAD, chunks on silence, and emits transcription JSON messages back. Uses the preloaded Whisper-style STT model — connect after calling `POST /v1/models` to select it.
 
+The initial configuration accepts the same model-specific rich-transcription
+options as the HTTP endpoint. For example, Granite Plus timestamps can be
+selected with:
+
+```json
+{
+  "model": "ibm-granite/granite-speech-4.1-2b-plus",
+  "sample_rate": 16000,
+  "task": "timestamps",
+  "word_timestamps": true
+}
+```
+
+VAD windows are decoded independently; this endpoint does not turn Granite's
+decoder-token streaming into online audio ingestion or maintain an incremental
+prefix between windows.
+
 #### `/v1/realtime` (OpenAI Realtime-compatible)
 
 ```

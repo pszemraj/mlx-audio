@@ -282,6 +282,33 @@ async def _preflight_model_load(model_name: str) -> None:
 _STT_EXTRA_KWARGS = {"word_timestamps", "timestamp_granularities"}
 
 
+def _prepare_stt_generate_kwargs(stt_model, gen_kwargs: Dict[str, Any]) -> dict:
+    """Return only generation options supported by an STT backend."""
+    generate_params = inspect.signature(stt_model.generate).parameters
+    if (
+        gen_kwargs.get("context")
+        and "context" not in generate_params
+        and "hotwords" in generate_params
+        and not gen_kwargs.get("hotwords")
+    ):
+        # ``context`` is the server's generic contextual-biasing field. Models
+        # with a structured hotword API receive it as one term.
+        gen_kwargs = {**gen_kwargs, "hotwords": gen_kwargs["context"]}
+
+    accepts_var_kwargs = any(
+        param.kind is inspect.Parameter.VAR_KEYWORD
+        for param in generate_params.values()
+    )
+    return {
+        key: value
+        for key, value in gen_kwargs.items()
+        if value is not None
+        and (
+            key in generate_params or (key in _STT_EXTRA_KWARGS and accepts_var_kwargs)
+        )
+    }
+
+
 class STTExecutionAdapter(BaseModelExecutionAdapter):
     def run_serial(self, request: InferenceRequest) -> None:
         payload: TranscriptionTaskPayload = request.payload
@@ -295,27 +322,7 @@ class STTExecutionAdapter(BaseModelExecutionAdapter):
             gen_kwargs = payload.request.model_dump(
                 exclude={"model"}, exclude_none=True
             )
-            signature = inspect.signature(stt_model.generate)
-            generate_params = signature.parameters
-            if (
-                gen_kwargs.get("context")
-                and "context" not in generate_params
-                and "hotwords" in generate_params
-                and not gen_kwargs.get("hotwords")
-            ):
-                # ``context`` is the server's generic contextual-biasing field.
-                # Models with a structured hotword API receive it as one term.
-                gen_kwargs["hotwords"] = gen_kwargs["context"]
-            accepts_var_kwargs = any(
-                param.kind is inspect.Parameter.VAR_KEYWORD
-                for param in generate_params.values()
-            )
-            gen_kwargs = {
-                key: value
-                for key, value in gen_kwargs.items()
-                if key in generate_params
-                or (key in _STT_EXTRA_KWARGS and accepts_var_kwargs)
-            }
+            gen_kwargs = _prepare_stt_generate_kwargs(stt_model, gen_kwargs)
 
             result = stt_model.generate(tmp_path, **gen_kwargs)
             if hasattr(result, "__iter__") and hasattr(result, "__next__"):
@@ -1226,6 +1233,7 @@ async def _stream_transcription(
     language: Optional[str],
     is_partial: bool,
     streaming: bool = True,
+    generation_options: Optional[Dict[str, Any]] = None,
 ):
     """Handle both streaming and non-streaming model inference over WebSocket.
 
@@ -1241,9 +1249,16 @@ async def _stream_transcription(
     supports_stream = "stream" in generate_params
 
     if supports_stream and streaming:
-        generate_kwargs = {"stream": True, "language": language, "verbose": False}
-        if "sample_rate" in generate_params:
-            generate_kwargs["sample_rate"] = sample_rate
+        generate_kwargs = _prepare_stt_generate_kwargs(
+            stt_model,
+            {
+                "stream": True,
+                "language": language,
+                "verbose": False,
+                "sample_rate": sample_rate,
+                **(generation_options or {}),
+            },
+        )
         result_iter = stt_model.generate(mx.array(audio_array), **generate_kwargs)
         accumulated = ""
         detected_language = language
@@ -1275,7 +1290,15 @@ async def _stream_transcription(
         tmp_path = f"/tmp/realtime_{time.time()}.mp3"
         audio_write(tmp_path, audio_array, sample_rate)
         try:
-            result = stt_model.generate(tmp_path, language=language, verbose=False)
+            generate_kwargs = _prepare_stt_generate_kwargs(
+                stt_model,
+                {
+                    "language": language,
+                    "verbose": False,
+                    **(generation_options or {}),
+                },
+            )
+            result = stt_model.generate(tmp_path, **generate_kwargs)
             segments = (
                 sanitize_for_json(result.segments)
                 if hasattr(result, "segments") and result.segments
@@ -1308,6 +1331,18 @@ async def stt_realtime_transcriptions(websocket: WebSocket):
         language = config.get("language", None)
         sample_rate = config.get("sample_rate", 16000)
         streaming = config.get("streaming", True)
+        generation_options = {
+            key: config[key]
+            for key in (
+                "task",
+                "prompt",
+                "prefix_text",
+                "hotwords",
+                "context",
+                "word_timestamps",
+            )
+            if key in config and config[key] is not None
+        }
 
         print(
             f"Configuration received: model={model_name}, language={language}, sample_rate={sample_rate}, streaming={streaming}"
@@ -1458,6 +1493,7 @@ async def stt_realtime_transcriptions(websocket: WebSocket):
                             language,
                             is_partial=True,
                             streaming=streaming,
+                            generation_options=generation_options,
                         )
                     except Exception as e:
                         import traceback
@@ -1484,6 +1520,7 @@ async def stt_realtime_transcriptions(websocket: WebSocket):
                             language,
                             is_partial=False,
                             streaming=streaming,
+                            generation_options=generation_options,
                         )
 
                         # Clear processed audio from buffer and reset state

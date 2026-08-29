@@ -655,16 +655,42 @@ def test_realtime_ws_streaming_structured_chunks(client, mock_model_provider):
     assert "Hello" in combined
 
 
-def test_realtime_ws_preserves_final_stream_segments(client, mock_model_provider):
+def test_realtime_ws_forwards_rich_task_and_preserves_segments(
+    client, mock_model_provider
+):
     segments = [{"text": "Hello", "start": 0.0, "end": 0.5}]
-    chunks = [MockChunk("Hello"), MockChunk("", segments=segments)]
-    gen_fn = _make_streaming_generate(chunks)
 
-    messages, _ = _ws_send_audio_and_collect(client, mock_model_provider, gen_fn)
+    def gen_fn(
+        audio,
+        *,
+        stream=False,
+        language=None,
+        verbose=False,
+        sample_rate=None,
+        task="asr",
+        word_timestamps=False,
+    ):
+        del audio, language, verbose, sample_rate
+        assert stream
+        assert task == "timestamps"
+        assert word_timestamps is True
+        return iter([MockChunk("Hello"), MockChunk("", segments=segments)])
+
+    messages, mock_stt_model = _ws_send_audio_and_collect(
+        client,
+        mock_model_provider,
+        gen_fn,
+        config_extra={"task": "timestamps", "word_timestamps": True},
+    )
 
     completes = [m for m in messages if m.get("type") == "complete"]
     assert completes
     assert completes[-1]["segments"] == segments
+    assert mock_stt_model.generate.call_args_list
+    assert all(
+        kwargs["task"] == "timestamps" and kwargs["word_timestamps"] is True
+        for _, kwargs in mock_stt_model.generate.call_args_list
+    )
 
 
 def test_realtime_ws_mx_array_pass(client, mock_model_provider):
