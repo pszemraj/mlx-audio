@@ -382,7 +382,15 @@ def make_silence_audio(duration_s, sample_rate=16000):
 def _make_streaming_generate(deltas):
     """Build a mock generate function with a ``stream`` parameter that yields deltas."""
 
-    def generate(audio, *, stream=False, language=None, verbose=False, **kwargs):
+    def generate(
+        audio,
+        *,
+        stream=False,
+        language=None,
+        verbose=False,
+        sample_rate=None,
+        **kwargs,
+    ):
         if stream:
             return iter(deltas)
         # Non-streaming fallback (shouldn't be called in streaming tests)
@@ -523,6 +531,16 @@ def test_realtime_ws_mx_array_pass(client, mock_model_provider):
         0
     ]  # first call, positional args, first arg
     assert isinstance(first_arg, mx.array), f"Expected mx.array, got {type(first_arg)}"
+
+
+def test_realtime_ws_forwards_array_sample_rate(client, mock_model_provider):
+    """Models declaring sample_rate receive the rate configured by the client."""
+    gen_fn = _make_streaming_generate(["test"])
+    _, mock_stt_model = _ws_send_audio_and_collect(client, mock_model_provider, gen_fn)
+
+    tracked = mock_stt_model.generate
+    assert tracked.call_args_list
+    assert tracked.call_args_list[0][1]["sample_rate"] == 16000
 
 
 def test_realtime_ws_mx_array_supports_bfloat16_cast(client, mock_model_provider):

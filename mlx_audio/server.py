@@ -1197,12 +1197,14 @@ async def _stream_transcription(
     Non-streaming models fall back to temp-file + batch generate, sending the
     legacy ``{"text": ..., "is_partial": ...}`` format.
     """
-    supports_stream = "stream" in inspect.signature(stt_model.generate).parameters
+    generate_params = inspect.signature(stt_model.generate).parameters
+    supports_stream = "stream" in generate_params
 
     if supports_stream and streaming:
-        result_iter = stt_model.generate(
-            mx.array(audio_array), stream=True, language=language, verbose=False
-        )
+        generate_kwargs = {"stream": True, "language": language, "verbose": False}
+        if "sample_rate" in generate_params:
+            generate_kwargs["sample_rate"] = sample_rate
+        result_iter = stt_model.generate(mx.array(audio_array), **generate_kwargs)
         accumulated = ""
         detected_language = language
         for chunk in result_iter:

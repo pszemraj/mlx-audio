@@ -25,6 +25,7 @@ LANGUAGE_CODES = {
     "pt": "Portuguese",
     "ja": "Japanese",
 }
+SAMPLE_RATE = 16000
 
 # Verbatim from the granite-speech-4.1-2b-plus model card. IBM's reference code
 # sends this system turn; without one the plus chat template substitutes a
@@ -653,7 +654,6 @@ class Model(nn.Module):
         win_length = 400
         hop_length = 160
         n_mels = 80
-        sample_rate = 16000
 
         if isinstance(audio, mx.array):
             audio_1d = audio.reshape(-1)
@@ -677,7 +677,7 @@ class Model(nn.Module):
         )
 
         power = mx.abs(spec) ** 2
-        mel_fb = mel_filters(sample_rate, n_fft, n_mels, mel_scale="htk")
+        mel_fb = mel_filters(SAMPLE_RATE, n_fft, n_mels, mel_scale="htk")
         mel_spec = power @ mel_fb.T
 
         logmel = mx.log10(mx.clip(mel_spec, 1e-10, None))
@@ -776,6 +776,7 @@ class Model(nn.Module):
         prefill_step_size: int = 2048,
         verbose: bool = False,
         stream: bool = False,
+        sample_rate: int = SAMPLE_RATE,
         **kwargs,
     ) -> Union[STTOutput, Generator[StreamingResult, None, None]]:
         from mlx_audio.stt.utils import merge_hotwords
@@ -811,6 +812,7 @@ class Model(nn.Module):
                 prefix_text=prefix_text,
                 prefill_step_size=prefill_step_size,
                 verbose=verbose,
+                sample_rate=sample_rate,
             )
 
         start_time = time.time()
@@ -818,7 +820,7 @@ class Model(nn.Module):
         from mlx_audio.lm.generate import generate_step
         from mlx_audio.lm.sample_utils import make_logits_processors, make_sampler
 
-        audio_data = self._load_audio(audio)
+        audio_data = self._load_audio(audio, sample_rate=sample_rate)
         input_features, num_audio_tokens = self._extract_features(audio_data)
 
         if verbose:
@@ -897,11 +899,12 @@ class Model(nn.Module):
         prefix_text: Optional[str] = None,
         prefill_step_size: int = 2048,
         verbose: bool = False,
+        sample_rate: int = SAMPLE_RATE,
     ) -> Generator[StreamingResult, None, None]:
         from mlx_audio.lm.generate import generate_step
         from mlx_audio.lm.sample_utils import make_logits_processors, make_sampler
 
-        audio_data = self._load_audio(audio)
+        audio_data = self._load_audio(audio, sample_rate=sample_rate)
         input_features, num_audio_tokens = self._extract_features(audio_data)
 
         audio_features = self.get_audio_features(input_features)
@@ -958,20 +961,36 @@ class Model(nn.Module):
             generation_tokens=gen_tokens,
         )
 
-    def _load_audio(self, audio: Union[str, mx.array, np.ndarray]) -> mx.array:
+    def _load_audio(
+        self,
+        audio: Union[str, mx.array, np.ndarray],
+        *,
+        sample_rate: int = SAMPLE_RATE,
+    ) -> mx.array:
+        if sample_rate <= 0:
+            raise ValueError("sample_rate must be a positive integer")
+
         if isinstance(audio, str):
             from mlx_audio.stt.utils import load_audio
 
-            return load_audio(audio)
+            return load_audio(audio, sr=SAMPLE_RATE)
         elif isinstance(audio, np.ndarray):
-            return mx.array(audio, dtype=mx.float32)
+            waveform = audio
         elif isinstance(audio, mx.array):
-            return audio
+            waveform = audio
         elif isinstance(audio, list):
             audio_item = audio[0]
             if isinstance(audio_item, str):
                 from mlx_audio.stt.utils import load_audio
 
-                return load_audio(audio_item)
-            return mx.array(np.array(audio_item), dtype=mx.float32)
-        raise TypeError(f"Unsupported audio type: {type(audio)}")
+                return load_audio(audio_item, sr=SAMPLE_RATE)
+            waveform = np.array(audio_item)
+        else:
+            raise TypeError(f"Unsupported audio type: {type(audio)}")
+
+        waveform = mx.array(waveform, dtype=mx.float32)
+        if sample_rate != SAMPLE_RATE:
+            from mlx_audio.stt.utils import resample_audio
+
+            waveform = resample_audio(waveform, sample_rate, SAMPLE_RATE)
+        return waveform.astype(mx.float32)

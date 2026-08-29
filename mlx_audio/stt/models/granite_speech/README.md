@@ -156,11 +156,14 @@ result = model.generate(
 - **Encoder**: CTC Conformer (16 layers, 1024 hidden dim, Shaw's relative positional embeddings, block-wise attention with context_size=200)
 - **Projector**: BLIP-2 QFormer (2 layers, windowed cross-attention with window_size=15, downsample_rate=5)
 - **Decoder**: Granite LLM (40 layers, 2048 hidden dim, GQA with 16/4 heads, RoPE, SwiGLU MLP)
-- Audio input: any sample rate, 80-bin mel spectrogram with pair stacking (160-dim input)
+- Audio input: 16 kHz, 80-bin mel spectrogram with pair stacking (160-dim input)
 
 ## Audio Input
 
-Granite Speech processes audio at its **original sample rate** without resampling. Supported input types:
+Granite Speech extracts features at **16 kHz**. File inputs are resampled from
+their stored sample rate. In-memory arrays are assumed to be 16 kHz unless their
+actual rate is passed to `generate`, for example
+`model.generate(samples, sample_rate=48000)`. Supported input types:
 
 - File path (WAV, FLAC, MP3, etc.)
 - NumPy array (raw waveform)

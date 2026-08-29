@@ -329,6 +329,40 @@ def test_audio_features_match_loaded_encoder_dtype(encoder_dtype):
     assert output.dtype == encoder_dtype
 
 
+def test_in_memory_audio_is_resampled_to_model_rate():
+    audio = np.zeros(48000, dtype=np.float32)
+
+    loaded = Model._load_audio(SimpleNamespace(), audio, sample_rate=48000)
+    mx.eval(loaded)
+
+    assert loaded.dtype == mx.float32
+    assert loaded.shape == (16000,)
+
+
+def test_load_audio_rejects_invalid_sample_rate():
+    with pytest.raises(ValueError, match="sample_rate must be a positive integer"):
+        Model._load_audio(SimpleNamespace(), np.zeros(1), sample_rate=0)
+
+
+def test_stream_generation_forwards_sample_rate():
+    forwarded = {}
+
+    def stream_generate(audio, **kwargs):
+        forwarded.update(kwargs)
+        return iter(())
+
+    stub_model = SimpleNamespace(
+        is_plus=False,
+        config=SimpleNamespace(model_type="granite_speech"),
+        _stream_generate=stream_generate,
+    )
+
+    result = Model.generate(stub_model, mx.zeros(48000), stream=True, sample_rate=48000)
+
+    assert list(result) == []
+    assert forwarded["sample_rate"] == 48000
+
+
 def test_encoder_parity_with_transformers_plus():
     torch = pytest.importorskip("torch")
     pytest.importorskip("transformers")
