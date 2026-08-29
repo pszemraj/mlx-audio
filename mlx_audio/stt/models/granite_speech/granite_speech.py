@@ -237,7 +237,7 @@ class ConformerAttention(nn.Module):
             row_valid = mx.arange(C)[:, None] < remainder
             col_valid = mx.arange(C)[None, :] < remainder
             mask = ~(row_valid & col_valid)
-            mask_value = mx.array(mx.finfo(pos_attn.dtype).min)
+            mask_value = mx.array(mx.finfo(pos_attn.dtype).min, dtype=pos_attn.dtype)
             pos_attn_last = mx.where(
                 mask[None, None, None], mask_value, pos_attn[:, -1:, :, :, :]
             )

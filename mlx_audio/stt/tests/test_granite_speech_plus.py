@@ -23,6 +23,7 @@ from mlx_audio.stt.models.granite_speech.config import (
 from mlx_audio.stt.models.granite_speech.granite_speech import (
     PLUS_SYSTEM_PROMPT,
     TASK_PROMPTS,
+    ConformerAttention,
     CTCEncoder,
     EncoderProjector,
     Model,
@@ -93,6 +94,29 @@ class TestEncoderCatHiddenLayers:
         # 8 frames -> 1 window of 15 -> window_size // downsample_rate queries
         num_queries = config.window_size // config.downsample_rate
         assert out.shape == (1, num_queries, 12)
+
+
+def test_non_aligned_attention_preserves_bfloat16():
+    config = _tiny_encoder_config(context_size=8)
+    attention = ConformerAttention(config)
+    attention.set_dtype(mx.bfloat16)
+
+    seq = mx.arange(config.context_size)
+    attention_dists = (
+        mx.clip(
+            seq[:, None] - seq[None, :],
+            -config.context_size,
+            config.context_size,
+        )
+        + config.max_pos_emb
+    )
+    output = attention(
+        mx.zeros((1, config.context_size + 1, config.hidden_dim), dtype=mx.bfloat16),
+        attention_dists,
+    )
+    mx.eval(output)
+
+    assert output.dtype == mx.bfloat16
 
 
 class TestOutputParsers:
