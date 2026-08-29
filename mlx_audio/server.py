@@ -324,19 +324,26 @@ class STTExecutionAdapter(BaseModelExecutionAdapter):
                     if request.cancel_event.is_set():
                         break
                     if isinstance(chunk, str):
-                        accumulated_text += chunk
+                        chunk_text = chunk
+                        accumulated_text += chunk_text
                         chunk_data = {
-                            "text": chunk,
+                            "text": chunk_text,
                             "accumulated": accumulated_text,
                         }
                     else:
+                        chunk_text = getattr(chunk, "text", "") or ""
+                        accumulated_text += chunk_text
                         chunk_data = {
-                            "text": chunk.text,
+                            "text": chunk_text,
+                            "accumulated": accumulated_text,
                             "start": getattr(chunk, "start_time", None),
                             "end": getattr(chunk, "end_time", None),
                             "is_final": getattr(chunk, "is_final", None),
                             "language": getattr(chunk, "language", None),
                         }
+                        segments = getattr(chunk, "segments", None)
+                        if segments is not None:
+                            chunk_data["segments"] = segments
                     request.emit_data(json.dumps(sanitize_for_json(chunk_data)) + "\n")
             elif not request.cancel_event.is_set():
                 request.emit_data(json.dumps(sanitize_for_json(result)) + "\n")
@@ -1115,7 +1122,7 @@ async def stt_transcriptions(
     )
 
     if response_format in ("text", "json", "verbose_json"):
-        full: Optional[dict] = None
+        full: dict = {}
         accumulated = ""
         try:
             while True:
@@ -1135,17 +1142,23 @@ async def stt_transcriptions(
                         obj = json.loads(raw)
                     except Exception:
                         continue
-                    if isinstance(obj, dict) and (
-                        "segments" in obj or "language" in obj
-                    ):
-                        full = obj
-                    elif isinstance(obj, dict) and "text" in obj:
-                        accumulated += obj.get("text") or ""
+                    if not isinstance(obj, dict):
+                        continue
+                    if isinstance(obj.get("accumulated"), str):
+                        accumulated = obj["accumulated"]
+                    elif isinstance(obj.get("text"), str):
+                        accumulated += obj["text"]
+                    full.update(
+                        {
+                            key: value
+                            for key, value in obj.items()
+                            if key not in {"text", "accumulated"}
+                        }
+                    )
         finally:
             handle.cancel()
 
-        if full is None:
-            full = {"text": accumulated}
+        full["text"] = accumulated
 
         if response_format == "text":
             return PlainTextResponse((full.get("text") or "").strip())
@@ -1234,6 +1247,7 @@ async def _stream_transcription(
         result_iter = stt_model.generate(mx.array(audio_array), **generate_kwargs)
         accumulated = ""
         detected_language = language
+        segments = None
         for chunk in result_iter:
             delta = (
                 chunk if isinstance(chunk, str) else getattr(chunk, "text", str(chunk))
@@ -1243,13 +1257,16 @@ async def _stream_transcription(
             chunk_lang = getattr(chunk, "language", None)
             if chunk_lang and detected_language is None:
                 detected_language = chunk_lang
+            chunk_segments = getattr(chunk, "segments", None)
+            if chunk_segments is not None:
+                segments = sanitize_for_json(chunk_segments)
             await websocket.send_json({"type": "delta", "delta": delta})
 
         await websocket.send_json(
             {
                 "type": "complete",
                 "text": accumulated,
-                "segments": None,
+                "segments": segments,
                 "language": detected_language,
                 "is_partial": is_partial,
             }

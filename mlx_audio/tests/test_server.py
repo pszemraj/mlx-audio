@@ -2,6 +2,7 @@ import functools
 import io
 import json
 import queue
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -433,6 +434,68 @@ def test_stt_context_aliases_to_single_hotword(client, mock_model_provider):
     assert captured_kwargs["hotwords"] == "Juniper"
 
 
+def test_stt_streamed_verbose_json_accumulates_text_and_segments(
+    client, mock_model_provider
+):
+    timestamp_segments = [
+        {
+            "text": "hello world",
+            "start": 0.0,
+            "end": 1.0,
+            "words": [
+                {"word": "hello", "start": 0.0, "end": 0.5},
+                {"word": "world", "start": 0.5, "end": 1.0},
+            ],
+        }
+    ]
+
+    def generate(path, *, stream=False):
+        del path
+        assert stream
+        yield SimpleNamespace(
+            text="hello ",
+            start_time=None,
+            end_time=None,
+            is_final=False,
+            language=None,
+            segments=None,
+        )
+        yield SimpleNamespace(
+            text="world",
+            start_time=None,
+            end_time=None,
+            is_final=False,
+            language=None,
+            segments=None,
+        )
+        yield SimpleNamespace(
+            text="",
+            start_time=None,
+            end_time=None,
+            is_final=True,
+            language=None,
+            segments=timestamp_segments,
+        )
+
+    mock_stt_model = MagicMock()
+    mock_stt_model.generate = generate
+    mock_model_provider.load_model = MagicMock(return_value=mock_stt_model)
+
+    response = client.post(
+        "/v1/audio/transcriptions",
+        files={"file": ("test.mp3", _make_transcription_audio_buffer(), "audio/mp3")},
+        data={
+            "model": "test_stt_model",
+            "response_format": "verbose_json",
+            "stream": "true",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["text"] == "hello world"
+    assert response.json()["segments"] == timestamp_segments
+
+
 # ---------------------------------------------------------------------------
 # WebSocket realtime streaming tests
 # ---------------------------------------------------------------------------
@@ -485,8 +548,9 @@ def _make_non_streaming_generate(text):
 class MockChunk:
     """Structured streaming result with a .text attribute."""
 
-    def __init__(self, text):
+    def __init__(self, text, segments=None):
         self.text = text
+        self.segments = segments
 
 
 def _trackable(fn):
@@ -589,6 +653,18 @@ def test_realtime_ws_streaming_structured_chunks(client, mock_model_provider):
     delta_texts = [d["delta"] for d in deltas]
     combined = "".join(delta_texts)
     assert "Hello" in combined
+
+
+def test_realtime_ws_preserves_final_stream_segments(client, mock_model_provider):
+    segments = [{"text": "Hello", "start": 0.0, "end": 0.5}]
+    chunks = [MockChunk("Hello"), MockChunk("", segments=segments)]
+    gen_fn = _make_streaming_generate(chunks)
+
+    messages, _ = _ws_send_audio_and_collect(client, mock_model_provider, gen_fn)
+
+    completes = [m for m in messages if m.get("type") == "complete"]
+    assert completes
+    assert completes[-1]["segments"] == segments
 
 
 def test_realtime_ws_mx_array_pass(client, mock_model_provider):
