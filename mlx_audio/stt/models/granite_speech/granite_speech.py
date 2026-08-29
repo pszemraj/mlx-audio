@@ -709,10 +709,11 @@ class Model(nn.Module):
         if user_prompt is None:
             user_prompt = TASK_PROMPTS["asr"]
 
-        # HF's reference prompts put a space between the audio placeholder and
-        # the instruction ("<|audio|> can you transcribe...").
+        # The plus checkpoint was trained with a separator after the audio
+        # placeholder; the 4.0/4.1 checkpoints concatenate the instruction.
         audio_placeholder = "<|audio|>" * num_audio_tokens
-        content = f"{audio_placeholder} {user_prompt.lstrip()}"
+        separator = " " if self.is_plus else ""
+        content = f"{audio_placeholder}{separator}{user_prompt.lstrip()}"
 
         template = getattr(self._tokenizer, "chat_template", None)
         if template:

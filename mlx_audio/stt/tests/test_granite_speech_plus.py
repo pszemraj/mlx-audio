@@ -199,17 +199,24 @@ class StubTokenizer:
         return [0]
 
 
-def _build_prompt(tokenizer, num_audio_tokens=2, prompt="do the thing", **kwargs):
-    stub_model = SimpleNamespace(_tokenizer=tokenizer)
+def _build_prompt(
+    tokenizer, num_audio_tokens=2, prompt="do the thing", *, is_plus=True, **kwargs
+):
+    stub_model = SimpleNamespace(_tokenizer=tokenizer, is_plus=is_plus)
     Model._build_prompt(stub_model, num_audio_tokens, prompt, **kwargs)
     return tokenizer.last_prompt
 
 
 class TestBuildPrompt:
-    def test_placeholder_space_and_user_turn(self):
+    def test_plus_placeholder_has_reference_space(self):
         tok = StubTokenizer(PLUS_TEMPLATE_TAIL)
         rendered = _build_prompt(tok)
         assert "<|audio|><|audio|> do the thing<|end_of_text|>" in rendered
+
+    def test_non_plus_placeholder_has_no_space(self):
+        tok = StubTokenizer(LEGACY_TEMPLATE)
+        rendered = _build_prompt(tok, is_plus=False)
+        assert "<|audio|><|audio|>do the thing<|end_of_text|>" in rendered
 
     def test_system_turn_inserted_first(self):
         tok = StubTokenizer(PLUS_TEMPLATE_TAIL)
@@ -236,7 +243,7 @@ class TestBuildPrompt:
 
     def test_default_prompt_is_asr_task(self):
         tok = StubTokenizer(PLUS_TEMPLATE_TAIL)
-        stub_model = SimpleNamespace(_tokenizer=tok)
+        stub_model = SimpleNamespace(_tokenizer=tok, is_plus=True)
         Model._build_prompt(stub_model, 1, None)
         assert TASK_PROMPTS["asr"] in tok.last_prompt
 
