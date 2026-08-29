@@ -802,7 +802,7 @@ class Model(nn.Module):
         language: str = None,
         system_prompt: Optional[str] = None,
         prefix_text: Optional[str] = None,
-        hotwords: Optional[List[str]] = None,
+        hotwords: Optional[Union[str, List[str]]] = None,
         prefill_step_size: int = 2048,
         verbose: bool = False,
         stream: bool = False,

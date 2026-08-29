@@ -25,6 +25,12 @@ class TestMergeHotwords:
     def test_terms_only(self):
         assert merge_hotwords(None, ["Nativ", "MLX"]) == "Nativ, MLX"
 
+    def test_single_string_is_one_term(self):
+        assert merge_hotwords(None, "QFormer") == "QFormer"
+
+    def test_blank_string_is_noop(self):
+        assert merge_hotwords("base", "   ") == "base"
+
     def test_appends_to_existing_base(self):
         assert (
             merge_hotwords("Prior text", ["Nativ", "MLX"]) == "Prior text\nNativ, MLX"

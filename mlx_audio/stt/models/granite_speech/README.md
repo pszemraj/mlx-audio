@@ -98,7 +98,9 @@ result = model.generate("audio.wav", task="timestamps", max_tokens=8192)
 for word in result.segments[0]["words"]:
     print(f"{word['word']}\t{word['start']:.2f}-{word['end']:.2f}s")
 
-# Keyword biasing (names, technical terms) works with any task
+# Keyword biasing (names, technical terms) works with any task. Pass either
+# one keyword or a list.
+result = model.generate("audio.wav", hotwords="Nativ")
 result = model.generate("audio.wav", hotwords=["Nativ", "QFormer"])
 ```
 
