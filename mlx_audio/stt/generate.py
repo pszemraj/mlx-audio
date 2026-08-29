@@ -59,8 +59,11 @@ def parse_args(argv: Optional[List[str]] = None):
     parser.add_argument(
         "--language",
         type=str,
-        default="en",
-        help="Language code (e.g. en, es, fr, de, etc.)",
+        default=None,
+        help=(
+            "Language code (e.g. en, es, fr, de); omit to use the model "
+            "default or automatic detection"
+        ),
     )
     parser.add_argument(
         "--chunk-duration",
@@ -289,6 +292,11 @@ def generate_transcription(
     # Add text to kwargs if provided (for forced alignment)
     if text:
         kwargs["text"] = text
+
+    # An omitted CLI language should preserve each model's own default. This
+    # also leaves auto-detecting models free to inspect the audio.
+    if kwargs.get("language") is None:
+        kwargs.pop("language", None)
 
     signature = inspect.signature(model.generate)
     kwargs = {k: v for k, v in kwargs.items() if k in signature.parameters}

@@ -13,7 +13,7 @@ import mlx.core as mx
 import numpy as np
 import pytest
 
-from mlx_audio.stt.generate import _get_cues, generate_transcription
+from mlx_audio.stt.generate import _get_cues, generate_transcription, parse_args
 from mlx_audio.stt.models.granite_speech.config import (
     EncoderConfig,
     ModelConfig,
@@ -306,9 +306,7 @@ class TestResolvePrompt:
     def test_explicit_prompt_wins(self):
         assert _resolve_prompt("saa", "custom", "fr") == "custom"
 
-    def test_task_beats_cli_default_language(self):
-        # The CLI always passes language (default "en"); a rich-transcription
-        # task must not degrade into a translation prompt.
+    def test_rich_task_beats_translation_language(self):
         assert _resolve_prompt("saa", None, "en") == TASK_PROMPTS["saa"]
         assert _resolve_prompt("timestamps", None, "en") == TASK_PROMPTS["timestamps"]
 
@@ -321,6 +319,27 @@ class TestResolvePrompt:
     def test_unknown_task_raises(self):
         with pytest.raises(ValueError, match="Unknown task"):
             _resolve_prompt("diarize", None, None)
+
+
+def test_cli_omits_language_to_preserve_model_default(tmp_path):
+    args = parse_args(["--audio", "audio.wav", "--output-path", "transcript"])
+    captured = {}
+
+    def generate(
+        audio, language="model-default", verbose=False, generation_stream=None
+    ):
+        captured["language"] = language
+        return SimpleNamespace(text="transcript", segments=[])
+
+    generate_transcription(
+        model=SimpleNamespace(generate=generate),
+        audio=mx.zeros((1,)),
+        output_path=str(tmp_path / "transcript"),
+        language=args.language,
+    )
+
+    assert args.language is None
+    assert captured["language"] == "model-default"
 
 
 class TestIsPlus:

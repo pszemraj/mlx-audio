@@ -107,8 +107,8 @@ def _parse_timestamps(text: str, prefix_text: Optional[str] = None) -> List[dict
 
 def _resolve_prompt(task: str, prompt: Optional[str], language: Optional[str]) -> str:
     # Priority: explicit prompt > rich-transcription task > translation via
-    # language > default ASR. The CLI always passes language (default "en"),
-    # so a non-asr task must not be overridden by it.
+    # language > default ASR. A rich-transcription task must not be overridden
+    # when a caller also supplies a translation language.
     if task not in TASK_PROMPTS:
         raise ValueError(
             f"Unknown task {task!r}; expected one of {sorted(TASK_PROMPTS)}"
