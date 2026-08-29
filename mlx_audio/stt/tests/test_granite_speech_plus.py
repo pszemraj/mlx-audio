@@ -363,6 +363,21 @@ class TestIsPlus:
         assert not self._is_plus(ModelConfig())
 
 
+def test_plus_model_type_alias_does_not_require_repo_name_hint():
+    from mlx_audio.stt.utils import MODEL_REMAPPING
+    from mlx_audio.utils import get_model_class
+
+    arch, model_type = get_model_class(
+        model_type="granite_speech_plus",
+        model_name=["1454e6e1e33845ca9280ff65f52cf1141ba6e6e2"],
+        category="stt",
+        model_remapping=MODEL_REMAPPING,
+    )
+
+    assert model_type == "granite_speech"
+    assert arch.Model is Model
+
+
 class TestSanitizeWeights:
     @pytest.mark.parametrize(
         ("name", "pytorch_shape", "mlx_shape"),

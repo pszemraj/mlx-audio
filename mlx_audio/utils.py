@@ -277,11 +277,11 @@ def get_model_class(
     Raises:
         ValueError: If the model type is not supported.
     """
-    # Stage 1: Check if the model type is in the remapping
-    model_type_mapped = model_remapping.get(model_type, None)
+    model_type_mapped = model_remapping.get(model_type)
 
-    # Stage 2: Check for partial matches in segments of the model name
-    # Only do this if the initial mapping didn't find a match
+    # Resolve an explicit config model_type before falling back to repository-name
+    # hints. Keep concrete compatibility modules (for example moss_tts_delay)
+    # addressable; aliases without a module must dispatch through the remapping.
     models_dir = Path(__file__).parent / category / "models"
     available_models = []
     if models_dir.exists() and models_dir.is_dir():
@@ -289,15 +289,16 @@ def get_model_class(
             if item.is_dir() and not item.name.startswith("__"):
                 available_models.append(item.name)
 
-    if model_name is not None and model_type_mapped != model_type:
-        for part in model_name:
-            if part in available_models:
-                model_type = part
-            if part in model_remapping:
-                model_type = model_remapping[part]
-                break
-    elif model_type_mapped is not None:
-        model_type = model_type_mapped
+    if model_type not in available_models:
+        if model_type_mapped is not None:
+            model_type = model_type_mapped
+        elif model_name is not None:
+            for part in model_name:
+                if part in available_models:
+                    model_type = part
+                if part in model_remapping:
+                    model_type = model_remapping[part]
+                    break
 
     try:
         module_path = f"mlx_audio.{category}.models.{model_type}"
