@@ -657,6 +657,17 @@ class Model(nn.Module):
 
         return model
 
+    @staticmethod
+    def _normalize_waveform(audio: Union[mx.array, np.ndarray]) -> mx.array:
+        waveform = mx.array(audio, dtype=mx.float32)
+        if waveform.ndim != 1:
+            raise ValueError(
+                "Granite Speech expects a mono 1-D waveform shaped (samples,), "
+                f"got {waveform.shape}. Downmix multichannel audio before calling "
+                "generate()."
+            )
+        return waveform
+
     def _extract_features(
         self, audio: Union[mx.array, np.ndarray]
     ) -> Tuple[mx.array, int]:
@@ -667,10 +678,7 @@ class Model(nn.Module):
         hop_length = 160
         n_mels = 80
 
-        if isinstance(audio, mx.array):
-            audio_1d = audio.reshape(-1)
-        else:
-            audio_1d = mx.array(audio.flatten(), dtype=mx.float32)
+        audio_1d = Model._normalize_waveform(audio)
 
         win = hanning(win_length, periodic=True)
         pad_left = (n_fft - win_length) // 2
@@ -1001,7 +1009,7 @@ class Model(nn.Module):
         else:
             raise TypeError(f"Unsupported audio type: {type(audio)}")
 
-        waveform = mx.array(waveform, dtype=mx.float32)
+        waveform = Model._normalize_waveform(waveform)
         if sample_rate != SAMPLE_RATE:
             from mlx_audio.stt.utils import resample_audio
 

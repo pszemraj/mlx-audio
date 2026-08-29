@@ -414,6 +414,12 @@ def test_in_memory_audio_is_resampled_to_model_rate():
     assert loaded.shape == (16000,)
 
 
+@pytest.mark.parametrize("shape", [(16000, 2), (2, 16000)])
+def test_in_memory_audio_rejects_multichannel_arrays(shape):
+    with pytest.raises(ValueError, match="mono 1-D waveform"):
+        Model._load_audio(SimpleNamespace(), np.zeros(shape, dtype=np.float32))
+
+
 def test_load_audio_rejects_invalid_sample_rate():
     with pytest.raises(ValueError, match="sample_rate must be a positive integer"):
         Model._load_audio(SimpleNamespace(), np.zeros(1), sample_rate=0)
