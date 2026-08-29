@@ -2,7 +2,11 @@ import mlx.core as mx
 import mlx.nn as nn
 import pytest
 
-from mlx_audio.lm.generate import generate_step, stream_generate
+from mlx_audio.lm.generate import (
+    NaiveStreamingDetokenizer,
+    generate_step,
+    stream_generate,
+)
 
 VOCAB = 17
 EOS = 5
@@ -83,3 +87,31 @@ def test_generate_step_negative_max_tokens_is_unbounded():
     stream = generate_step(mx.array([1, 2]), CycleModel(), max_tokens=-1)
     produced = [int(pair[0]) for pair, _ in zip(stream, range(40))]
     assert len(produced) == 40
+
+
+def test_streaming_detokenizer_buffers_split_utf8_codepoints():
+    class ByteTokenizer:
+        clean_up_tokenization_spaces = False
+        pieces = {
+            1: b"hello ",
+            2: b"\xe4",
+            3: b"\xb8",
+            4: b"\x96",
+        }
+
+        def decode(self, token_ids, **kwargs):
+            del kwargs
+            encoded = b"".join(self.pieces[token_id] for token_id in token_ids)
+            return encoded.decode("utf-8", errors="replace")
+
+    detokenizer = NaiveStreamingDetokenizer(ByteTokenizer())
+    deltas = []
+    for token in [1, 2, 3, 4]:
+        detokenizer.add_token(token)
+        deltas.append(detokenizer.last_segment)
+    detokenizer.finalize()
+    deltas.append(detokenizer.last_segment)
+
+    assert "".join(deltas) == "hello \u4e16"
+    assert "\ufffd" not in "".join(deltas)
+    assert detokenizer.text == "hello \u4e16"

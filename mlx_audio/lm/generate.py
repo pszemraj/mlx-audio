@@ -65,22 +65,60 @@ class GenerationResponse:
     finish_reason: Optional[str] = None
 
 
-class _NaiveDetokenizer:
-    def __init__(self, tokenizer):
+class NaiveStreamingDetokenizer:
+    """Stateful fallback detokenizer for autoregressive token streams.
+
+    Tokenizers may split a UTF-8 code point across multiple token IDs, so a
+    single token is not necessarily independently decodable. This fallback
+    buffers the current line, suppresses an incomplete trailing code point,
+    and exposes only text that is stable relative to the preceding emission.
+    """
+
+    def __init__(self, tokenizer, **decode_kwargs):
         self.tokenizer = tokenizer
+        self.decode_kwargs = decode_kwargs
+        self.clean_spaces = bool(
+            getattr(tokenizer, "clean_up_tokenization_spaces", False)
+        )
         self.reset()
 
     def reset(self):
         self.tokens = []
-        self.text = ""
+        self._text = ""
+        self._current_tokens = []
+        self._current_text = ""
         self.offset = 0
 
     def add_token(self, token):
         self.tokens.append(token)
-        self.text = self.tokenizer.decode(self.tokens)
+        self._current_tokens.append(token)
 
     def finalize(self):
-        self.text = self.tokenizer.decode(self.tokens)
+        if self._current_tokens:
+            self._text += self.tokenizer.decode(
+                self._current_tokens, **self.decode_kwargs
+            )
+        self._current_tokens = []
+        self._current_text = ""
+
+    @property
+    def text(self):
+        if self._current_tokens:
+            current_text = self.tokenizer.decode(
+                self._current_tokens, **self.decode_kwargs
+            )
+            if current_text.endswith("\ufffd"):
+                current_text = current_text[:-1]
+            elif self.clean_spaces and current_text.endswith(" "):
+                current_text = current_text[:-1]
+            self._current_text = current_text
+
+        if self._current_text.endswith("\n"):
+            self._text += self._current_text
+            self._current_tokens = []
+            self._current_text = ""
+
+        return self._text + self._current_text
 
     @property
     def last_segment(self):
@@ -214,7 +252,7 @@ def stream_generate(
         raise ValueError("Speculative decoding is not implemented in mlx-audio.lm.")
 
     prompt = _encode(tokenizer, prompt)
-    detokenizer = _NaiveDetokenizer(tokenizer)
+    detokenizer = NaiveStreamingDetokenizer(tokenizer)
     eos_ids = _eos_ids(tokenizer)
     last_token = last_logprobs = None
     prompt_tps = 0.0
