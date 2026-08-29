@@ -13,7 +13,7 @@ import mlx.core as mx
 import numpy as np
 import pytest
 
-from mlx_audio.stt.generate import _get_cues
+from mlx_audio.stt.generate import _get_cues, generate_transcription
 from mlx_audio.stt.models.granite_speech.config import (
     EncoderConfig,
     ModelConfig,
@@ -188,6 +188,28 @@ class TestOutputParsers:
 
     def test_saa_continuation_without_prefix_tags_unchanged(self):
         assert _parse_segments("saa", "plain text", prefix_text="no tags here") == []
+
+    @pytest.mark.parametrize("output_format", ["srt", "vtt"])
+    def test_untimed_saa_subtitles_fall_back_to_text(
+        self, output_format, tmp_path, capsys
+    ):
+        def generate(audio, verbose=False, generation_stream=None):
+            return SimpleNamespace(
+                text="complete transcript",
+                segments=[{"speaker_id": 1, "text": "complete transcript"}],
+            )
+
+        output_path = tmp_path / "transcript"
+        generate_transcription(
+            model=SimpleNamespace(generate=generate),
+            audio=mx.zeros((1,)),
+            output_path=str(output_path),
+            format=output_format,
+        )
+
+        assert "No timed cues found" in capsys.readouterr().out
+        assert output_path.with_suffix(".txt").read_text() == "complete transcript"
+        assert not output_path.with_suffix(f".{output_format}").exists()
 
 
 # Enough of the plus chat template to exercise the native prefix_text hook and

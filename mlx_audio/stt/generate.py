@@ -377,6 +377,9 @@ def generate_transcription(
         if not has_segments and not has_sentences:
             print("[WARNING] No segments found, saving as plain text.")
         save_as_txt(segments, output_path)
+    elif format in {"srt", "vtt"} and not _get_cues(segments):
+        print("[WARNING] No timed cues found, saving as plain text.")
+        save_as_txt(segments, output_path)
     elif format == "srt":
         save_as_srt(segments, output_path)
     elif format == "vtt":
