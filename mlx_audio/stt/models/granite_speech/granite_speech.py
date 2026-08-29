@@ -658,6 +658,16 @@ class Model(nn.Module):
 
     @staticmethod
     def _normalize_waveform(audio: Union[mx.array, np.ndarray]) -> mx.array:
+        if isinstance(audio, np.ndarray):
+            is_floating = np.issubdtype(audio.dtype, np.floating)
+        else:
+            is_floating = mx.issubdtype(audio.dtype, mx.floating)
+        if not is_floating:
+            raise ValueError(
+                "Granite Speech expects normalized floating-point waveform samples; "
+                "integer PCM arrays must be converted and scaled before generate()."
+            )
+
         waveform = mx.array(audio, dtype=mx.float32)
         if waveform.ndim != 1:
             raise ValueError(

@@ -200,8 +200,9 @@ Granite Speech extracts features at **16 kHz**. File inputs are resampled from
 their stored sample rate. In-memory arrays are assumed to be 16 kHz unless their
 actual rate is passed to `generate`, for example
 `model.generate(samples, sample_rate=48000)`. In-memory waveforms must be mono,
-one-dimensional arrays shaped `(samples,)`; downmix multichannel PCM before
-calling `generate`. Supported input types:
+normalized floating-point arrays shaped `(samples,)`; downmix multichannel PCM
+and scale integer PCM to floating point before calling `generate`. File inputs
+are decoded and normalized automatically. Supported input types:
 
 - File path (WAV, FLAC, MP3, etc.)
 - NumPy array (raw waveform)
