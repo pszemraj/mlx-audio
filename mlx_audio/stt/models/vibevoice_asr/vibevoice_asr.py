@@ -793,7 +793,7 @@ class Model(nn.Module):
         Yields:
             Decoded text chunks as they are generated.
         """
-        from mlx_audio.lm.generate import NaiveStreamingDetokenizer
+        from mlx_audio.lm.generate import StreamingDetokenizer
         from mlx_audio.lm.sample_utils import make_logits_processors, make_sampler
 
         # Preprocess audio
@@ -822,7 +822,7 @@ class Model(nn.Module):
             repetition_penalty=repetition_penalty,
             repetition_context_size=repetition_context_size,
         )
-        detokenizer = NaiveStreamingDetokenizer(self.tokenizer)
+        detokenizer = StreamingDetokenizer(self.tokenizer)
 
         # Stream tokens
         for token, _ in self.stream_generate(

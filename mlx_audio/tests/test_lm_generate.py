@@ -4,6 +4,7 @@ import pytest
 
 from mlx_audio.lm.generate import (
     NaiveStreamingDetokenizer,
+    StreamingDetokenizer,
     generate_step,
     stream_generate,
 )
@@ -113,7 +114,7 @@ def test_streaming_detokenizer_buffers_split_utf8_codepoints(pieces, tokens, exp
             encoded = b"".join(pieces[token_id] for token_id in token_ids)
             return encoded.decode("utf-8", errors="replace")
 
-    detokenizer = NaiveStreamingDetokenizer(ByteTokenizer())
+    detokenizer = StreamingDetokenizer(ByteTokenizer())
     deltas = []
     for token in tokens:
         detokenizer.add_token(token)
@@ -139,8 +140,78 @@ def test_streaming_detokenizer_last_segment_decodes_once():
             return "".join(str(token_id) for token_id in token_ids)
 
     tokenizer = CountingTokenizer()
-    detokenizer = NaiveStreamingDetokenizer(tokenizer)
+    detokenizer = StreamingDetokenizer(tokenizer)
     detokenizer.add_token(1)
 
     assert detokenizer.last_segment == "1"
     assert tokenizer.decode_calls == 1
+
+
+def test_old_detokenizer_name_remains_compatible():
+    assert NaiveStreamingDetokenizer is StreamingDetokenizer
+
+
+def test_fast_streaming_detokenizer_is_linear_and_matches_batch_decode():
+    from tokenizers import Tokenizer, models
+
+    backend = Tokenizer(models.WordLevel({"世": 0, "[EOS]": 1}, unk_token="[EOS]"))
+    backend.add_special_tokens(["[EOS]"])
+
+    class FastTokenizer:
+        backend_tokenizer = backend
+        clean_up_tokenization_spaces = False
+
+        def __init__(self):
+            self.decode_calls = 0
+
+        def decode(self, token_ids, **kwargs):
+            self.decode_calls += 1
+            return backend.decode(token_ids, **kwargs)
+
+    tokenizer = FastTokenizer()
+    token_ids = [0, 1] * 500
+    detokenizer = StreamingDetokenizer(tokenizer, skip_special_tokens=True)
+    deltas = []
+    for token_id in token_ids:
+        detokenizer.add_token(token_id)
+        deltas.append(detokenizer.last_segment)
+    detokenizer.finalize()
+    deltas.append(detokenizer.last_segment)
+
+    expected = backend.decode(token_ids, skip_special_tokens=True)
+    assert "".join(deltas) == expected
+    assert detokenizer.text == expected
+    assert tokenizer.decode_calls == 0
+
+    detokenizer.reset()
+    assert detokenizer.text == ""
+    detokenizer.add_token(0)
+    assert detokenizer.last_segment == "世"
+
+
+def test_backendless_fallback_bounds_total_decode_work():
+    class CountingTokenizer:
+        clean_up_tokenization_spaces = False
+
+        def __init__(self):
+            self.decoded_ids = 0
+            self.max_decode_size = 0
+
+        def decode(self, token_ids, **kwargs):
+            del kwargs
+            self.decoded_ids += len(token_ids)
+            self.max_decode_size = max(self.max_decode_size, len(token_ids))
+            return "".join("x" for _ in token_ids)
+
+    tokenizer = CountingTokenizer()
+    detokenizer = StreamingDetokenizer(tokenizer)
+    deltas = []
+    for token_id in range(1_000):
+        detokenizer.add_token(token_id)
+        deltas.append(detokenizer.last_segment)
+    detokenizer.finalize()
+    deltas.append(detokenizer.last_segment)
+
+    assert "".join(deltas) == "x" * 1_000
+    assert tokenizer.max_decode_size <= 65
+    assert tokenizer.decoded_ids < 70_000

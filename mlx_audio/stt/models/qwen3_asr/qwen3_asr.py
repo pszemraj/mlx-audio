@@ -1467,7 +1467,7 @@ class Qwen3ASRModel(nn.Module):
         Yields:
             StreamingResult objects with text, timing, and status information.
         """
-        from mlx_audio.lm.generate import NaiveStreamingDetokenizer
+        from mlx_audio.lm.generate import StreamingDetokenizer
         from mlx_audio.lm.sample_utils import make_logits_processors, make_sampler
         from mlx_audio.stt.utils import load_audio
 
@@ -1532,7 +1532,7 @@ class Qwen3ASRModel(nn.Module):
             token_count = 0
             emitted_token_count = 0
             language_tokens = []
-            detokenizer = NaiveStreamingDetokenizer(self._tokenizer)
+            detokenizer = StreamingDetokenizer(self._tokenizer)
 
             # Get prompt tokens for this chunk
             _, _, num_audio_tokens = self._preprocess_audio(chunk_audio)

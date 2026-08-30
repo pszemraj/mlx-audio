@@ -27,6 +27,7 @@ dependencies = [
     "sounddevice>=0.5.3",
     "tqdm>=4.67.1",
     "transformers>=5.14.0",
+    "tokenizers>=0.22.0",
 ]
 
 [project.optional-dependencies]

@@ -808,7 +808,7 @@ class Model(nn.Module):
         prefill_step_size: int,
         verbose: bool,
     ) -> Generator[StreamingResult, None, None]:
-        from mlx_audio.lm.generate import NaiveStreamingDetokenizer
+        from mlx_audio.lm.generate import StreamingDetokenizer
 
         processor = self._ensure_processor()
         processed = processor(
@@ -820,7 +820,7 @@ class Model(nn.Module):
             self._build_prompt_embeddings(processed)
         )
         generated = 0
-        detokenizer = NaiveStreamingDetokenizer(processor, skip_special_tokens=True)
+        detokenizer = StreamingDetokenizer(processor, skip_special_tokens=True)
         for token in self._generate_tokens(
             prompt_ids,
             input_embeds,

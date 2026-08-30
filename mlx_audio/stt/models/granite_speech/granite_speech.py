@@ -1092,7 +1092,7 @@ class Model(nn.Module):
         verbose: bool = False,
         sample_rate: int = SAMPLE_RATE,
     ) -> Generator[StreamingResult, None, None]:
-        from mlx_audio.lm.generate import NaiveStreamingDetokenizer, generate_step
+        from mlx_audio.lm.generate import StreamingDetokenizer, generate_step
         from mlx_audio.lm.sample_utils import make_logits_processors, make_sampler
 
         audio_data = self._load_audio(audio, sample_rate=sample_rate)
@@ -1121,9 +1121,7 @@ class Model(nn.Module):
         eos_token_id = self._tokenizer.eos_token_id
         gen_tokens = 0
         hit_eos = False
-        detokenizer = NaiveStreamingDetokenizer(
-            self._tokenizer, skip_special_tokens=True
-        )
+        detokenizer = StreamingDetokenizer(self._tokenizer, skip_special_tokens=True)
 
         for token, _ in generate_step(
             prompt=prompt_ids,

@@ -65,14 +65,12 @@ class GenerationResponse:
     finish_reason: Optional[str] = None
 
 
-class NaiveStreamingDetokenizer:
-    """Stateful fallback detokenizer for autoregressive token streams.
+class _BoundedStreamingDetokenizer:
+    """Compatibility detokenizer for tokenizers without a Rust backend."""
 
-    Tokenizers may split a UTF-8 code point across multiple token IDs, so a
-    single token is not necessarily independently decodable. This fallback
-    buffers the current line, suppresses an incomplete trailing code point,
-    and exposes only text that is stable relative to the preceding emission.
-    """
+    _REDECODE_WINDOW = 64
+    _BOUNDARY_OVERLAP = 32
+    _MAX_PENDING_TOKENS = 128
 
     def __init__(self, tokenizer, **decode_kwargs):
         self.tokenizer = tokenizer
@@ -92,12 +90,39 @@ class NaiveStreamingDetokenizer:
     def add_token(self, token):
         self.tokens.append(token)
         self._current_tokens.append(token)
+        self._compact_pending_tokens()
+
+    def _decode(self, token_ids):
+        return self.tokenizer.decode(token_ids, **self.decode_kwargs)
+
+    def _compact_pending_tokens(self):
+        if len(self._current_tokens) <= self._REDECODE_WINDOW:
+            return
+
+        full_text = self._decode(self._current_tokens)
+        preferred_cut = len(self._current_tokens) - self._BOUNDARY_OVERLAP
+        for cut in range(preferred_cut, 0, -1):
+            prefix = self._decode(self._current_tokens[:cut])
+            suffix = self._decode(self._current_tokens[cut:])
+            if (
+                prefix + suffix == full_text
+                and not prefix.endswith("\ufffd")
+                and not suffix.startswith("\ufffd")
+            ):
+                self._text += prefix
+                self._current_tokens = self._current_tokens[cut:]
+                self._current_text = ""
+                return
+
+        if len(self._current_tokens) >= self._MAX_PENDING_TOKENS:
+            raise RuntimeError(
+                "The tokenizer cannot be incrementally decoded within a bounded "
+                "window. Use a fast tokenizer with a tokenizers.Tokenizer backend."
+            )
 
     def finalize(self):
         if self._current_tokens:
-            self._text += self.tokenizer.decode(
-                self._current_tokens, **self.decode_kwargs
-            )
+            self._text += self._decode(self._current_tokens)
         self._current_tokens = []
         self._current_text = ""
 
@@ -105,9 +130,7 @@ class NaiveStreamingDetokenizer:
     def text(self):
         has_incomplete_codepoint = False
         if self._current_tokens:
-            current_text = self.tokenizer.decode(
-                self._current_tokens, **self.decode_kwargs
-            )
+            current_text = self._decode(self._current_tokens)
             has_incomplete_codepoint = current_text.endswith("\ufffd")
             if has_incomplete_codepoint:
                 current_text = current_text[:-1]
@@ -128,6 +151,96 @@ class NaiveStreamingDetokenizer:
         segment = text[self.offset :]
         self.offset = len(text)
         return segment
+
+
+class _BackendStreamingDetokenizer:
+    """Linear incremental decoding through tokenizers.DecodeStream."""
+
+    def __init__(self, tokenizer, backend, *, skip_special_tokens=False):
+        from tokenizers.decoders import DecodeStream
+
+        self.tokenizer = tokenizer
+        self.backend = backend
+        self.skip_special_tokens = skip_special_tokens
+        self._decode_stream_type = DecodeStream
+        self.reset()
+
+    def reset(self):
+        self.tokens = []
+        self._text = ""
+        self.offset = 0
+        self._stream = self._decode_stream_type(
+            skip_special_tokens=self.skip_special_tokens
+        )
+
+    def add_token(self, token):
+        token = int(token)
+        self.tokens.append(token)
+        self._text += self._stream.step(self.backend, token) or ""
+
+    def finalize(self):
+        return None
+
+    @property
+    def text(self):
+        return self._text
+
+    @property
+    def last_segment(self):
+        segment = self._text[self.offset :]
+        self.offset = len(self._text)
+        return segment
+
+
+class StreamingDetokenizer:
+    """Backend-aware incremental detokenizer with a bounded fallback."""
+
+    def __init__(self, tokenizer, **decode_kwargs):
+        backend = getattr(tokenizer, "backend_tokenizer", None)
+        if backend is None:
+            backend = getattr(tokenizer, "_tokenizer", None)
+
+        skip_special_tokens = bool(decode_kwargs.get("skip_special_tokens", False))
+        extra_decode_kwargs = set(decode_kwargs) - {"skip_special_tokens"}
+        try:
+            from tokenizers import Tokenizer
+            from tokenizers.decoders import DecodeStream  # noqa: F401
+        except ImportError:
+            Tokenizer = ()
+
+        if isinstance(backend, Tokenizer) and not extra_decode_kwargs:
+            self._impl = _BackendStreamingDetokenizer(
+                tokenizer,
+                backend,
+                skip_special_tokens=skip_special_tokens,
+            )
+        else:
+            self._impl = _BoundedStreamingDetokenizer(tokenizer, **decode_kwargs)
+
+    def reset(self):
+        self._impl.reset()
+
+    def add_token(self, token):
+        self._impl.add_token(token)
+
+    def finalize(self):
+        return self._impl.finalize()
+
+    @property
+    def tokens(self):
+        return self._impl.tokens
+
+    @property
+    def text(self):
+        return self._impl.text
+
+    @property
+    def last_segment(self):
+        return self._impl.last_segment
+
+
+# Backward compatibility for downstream imports of the previously public name.
+NaiveStreamingDetokenizer = StreamingDetokenizer
 
 
 def _supports_input_embeddings(model: nn.Module) -> bool:
@@ -255,7 +368,7 @@ def stream_generate(
         raise ValueError("Speculative decoding is not implemented in mlx-audio.lm.")
 
     prompt = _encode(tokenizer, prompt)
-    detokenizer = NaiveStreamingDetokenizer(tokenizer)
+    detokenizer = StreamingDetokenizer(tokenizer)
     eos_ids = _eos_ids(tokenizer)
     last_token = last_logprobs = None
     prompt_tps = 0.0

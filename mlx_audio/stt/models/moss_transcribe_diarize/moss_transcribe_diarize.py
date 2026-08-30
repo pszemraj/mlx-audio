@@ -621,12 +621,10 @@ class Model(nn.Module):
         prefill_step_size: int,
         verbose: bool,
     ) -> Generator[StreamingResult, None, None]:
-        from mlx_audio.lm.generate import NaiveStreamingDetokenizer
+        from mlx_audio.lm.generate import StreamingDetokenizer
 
         gen_tokens = 0
-        detokenizer = NaiveStreamingDetokenizer(
-            self._tokenizer, skip_special_tokens=True
-        )
+        detokenizer = StreamingDetokenizer(self._tokenizer, skip_special_tokens=True)
         for token, _ in self.stream_generate(
             audio,
             max_tokens=max_tokens,

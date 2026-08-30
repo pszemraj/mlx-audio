@@ -18,7 +18,7 @@ import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 
-from mlx_audio.lm.generate import NaiveStreamingDetokenizer
+from mlx_audio.lm.generate import StreamingDetokenizer
 
 from .config import RAW_AUDIO_LENGTH_PER_TOK, _num_delay_tokens
 
@@ -481,7 +481,7 @@ class VoxtralStreamingSession:
         self._next_tok: Optional[mx.array] = None
         self._pos = self._prompt_len
         self.generated: list[int] = []
-        self._detokenizer = NaiveStreamingDetokenizer(model._tokenizer)
+        self._detokenizer = StreamingDetokenizer(model._tokenizer)
         self._trailing_after_close = 0
         self._done = False
         self._left_pad_seeded = False

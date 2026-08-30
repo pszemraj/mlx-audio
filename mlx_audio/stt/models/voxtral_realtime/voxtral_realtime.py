@@ -400,7 +400,7 @@ class Model(nn.Module):
         self, audio_np, max_tokens, temperature, verbose, transcription_delay_ms=None
     ):
         """Generator that yields text deltas as tokens are decoded."""
-        from mlx_audio.lm.generate import NaiveStreamingDetokenizer
+        from mlx_audio.lm.generate import StreamingDetokenizer
 
         adapter_out, n_audio, prompt_len, logits, cache, enc_chunk_gen, start_time = (
             self._encode_and_prefill(audio_np, verbose, transcription_delay_ms)
@@ -408,7 +408,7 @@ class Model(nn.Module):
 
         adapter_len = adapter_out.shape[0]
         generated = []
-        detokenizer = NaiveStreamingDetokenizer(self._tokenizer)
+        detokenizer = StreamingDetokenizer(self._tokenizer)
 
         next_tok = self._next_token_mx(logits, temperature)
         mx.async_eval(next_tok)

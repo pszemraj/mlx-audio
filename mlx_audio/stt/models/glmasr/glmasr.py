@@ -868,7 +868,7 @@ class Model(nn.Module):
             StreamingResult objects for this chunk. The chunk-final result
             includes token counts (prompt_tokens, generation_tokens).
         """
-        from mlx_audio.lm.generate import NaiveStreamingDetokenizer
+        from mlx_audio.lm.generate import StreamingDetokenizer
 
         # Preprocess chunk to mel spectrogram
         mel = self._preprocess_audio(audio_chunk)
@@ -897,7 +897,7 @@ class Model(nn.Module):
 
         token_count = 0
         emitted_token_count = 0
-        detokenizer = NaiveStreamingDetokenizer(self._tokenizer)
+        detokenizer = StreamingDetokenizer(self._tokenizer)
 
         for token, _ in self.stream_generate(
             input_ids=input_ids,
