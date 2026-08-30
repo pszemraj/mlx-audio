@@ -196,6 +196,13 @@ result = model.generate(
 )
 ```
 
+Granite results report `finish_reason="stop"` and `complete=True` after EOS.
+Plain ASR that reaches `max_tokens` is returned as partial text with
+`finish_reason="length"`, `complete=False`, and `raw_text`. Structured `saa`
+and `timestamps` calls fail closed instead; streaming callers receive those
+fields plus an `error` on the final result. The HTTP server uses a 10,000-token
+default for timestamp mode when the request does not set `max_tokens`.
+
 ## Architecture
 
 - **Encoder**: CTC Conformer (16 layers, 1024 hidden dim, Shaw's relative positional embeddings, block-wise attention with context_size=200)

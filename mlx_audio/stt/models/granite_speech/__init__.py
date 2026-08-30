@@ -1,5 +1,6 @@
 from .config import EncoderConfig, ModelConfig, ProjectorConfig, TextConfig
 from .granite_speech import (
+    IncompleteTranscription,
     Model,
     StructuredTranscriptError,
     UnsupportedTranscriptionTask,
@@ -18,6 +19,7 @@ __all__ = [
     "ProjectorConfig",
     "TextConfig",
     "ModelConfig",
+    "IncompleteTranscription",
     "Model",
     "StructuredTranscriptError",
     "UnsupportedTranscriptionTask",

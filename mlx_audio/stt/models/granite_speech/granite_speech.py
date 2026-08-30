@@ -66,6 +66,19 @@ class StructuredTranscriptError(RuntimeError):
         self.raw_text = raw_text
 
 
+class IncompleteTranscription(RuntimeError):
+    """Generation reached its token budget before a transcript was complete."""
+
+    def __init__(self, *, task: str, max_tokens: int, partial_text: str) -> None:
+        super().__init__(
+            f"Granite {task} generation reached max_tokens={max_tokens} before "
+            "EOS. The structured transcript is incomplete."
+        )
+        self.task = task
+        self.max_tokens = max_tokens
+        self.partial_text = partial_text
+
+
 def _normalize_task(task: str, *, word_timestamps: bool = False) -> str:
     normalized = (task or "asr").lower().strip()
     if normalized not in TASK_PROMPTS:
@@ -225,6 +238,10 @@ class StreamingResult:
     prompt_tokens: int = 0
     generation_tokens: int = 0
     segments: Optional[List[dict]] = None
+    finish_reason: Optional[str] = None
+    complete: Optional[bool] = None
+    raw_text: Optional[str] = None
+    error: Optional[str] = None
 
 
 class BatchNorm1d(nn.Module):
@@ -1006,6 +1023,7 @@ class Model(nn.Module):
 
         eos_token_id = self._tokenizer.eos_token_id
         tokens = []
+        hit_eos = False
 
         for token, logprobs in generate_step(
             prompt=prompt_ids,
@@ -1016,11 +1034,19 @@ class Model(nn.Module):
             logits_processors=logits_processors,
             prefill_step_size=prefill_step_size,
         ):
-            if token == eos_token_id:
+            if int(token) == eos_token_id:
+                hit_eos = True
                 break
-            tokens.append(token)
+            tokens.append(int(token))
 
         text = self._tokenizer.decode(tokens, skip_special_tokens=True)
+        finish_reason = "stop" if hit_eos else "length"
+        if task != "asr" and not hit_eos:
+            raise IncompleteTranscription(
+                task=task,
+                max_tokens=max_tokens,
+                partial_text=text,
+            )
         if task != "asr":
             _validate_structured_output(task, text, prefix_text)
         elapsed = time.time() - start_time
@@ -1042,6 +1068,9 @@ class Model(nn.Module):
             total_time=elapsed,
             prompt_tps=prompt_tokens / elapsed if elapsed > 0 else 0,
             generation_tps=gen_tokens / elapsed if elapsed > 0 else 0,
+            finish_reason=finish_reason,
+            complete=hit_eos,
+            raw_text=text if not hit_eos else None,
         )
 
     def _stream_generate(
@@ -1091,6 +1120,7 @@ class Model(nn.Module):
 
         eos_token_id = self._tokenizer.eos_token_id
         gen_tokens = 0
+        hit_eos = False
         detokenizer = NaiveStreamingDetokenizer(
             self._tokenizer, skip_special_tokens=True
         )
@@ -1104,7 +1134,8 @@ class Model(nn.Module):
             logits_processors=logits_processors,
             prefill_step_size=prefill_step_size,
         ):
-            if token == eos_token_id:
+            if int(token) == eos_token_id:
+                hit_eos = True
                 break
             gen_tokens += 1
             detokenizer.add_token(token)
@@ -1120,8 +1151,28 @@ class Model(nn.Module):
 
         detokenizer.finalize()
         full_text = detokenizer.text
-        if task != "asr":
-            _validate_structured_output(task, full_text, prefix_text)
+        finish_reason = "stop" if hit_eos else "length"
+        complete = hit_eos
+        raw_text = full_text if not hit_eos else None
+        error = None
+        segments = None
+
+        if task != "asr" and not hit_eos:
+            incomplete = IncompleteTranscription(
+                task=task,
+                max_tokens=max_tokens,
+                partial_text=full_text,
+            )
+            error = str(incomplete)
+        elif task != "asr":
+            try:
+                _validate_structured_output(task, full_text, prefix_text)
+                segments = _parse_segments(task, full_text, prefix_text)
+            except StructuredTranscriptError as exc:
+                complete = False
+                raw_text = exc.raw_text
+                error = str(exc)
+
         yield StreamingResult(
             text=detokenizer.last_segment,
             is_final=True,
@@ -1129,9 +1180,11 @@ class Model(nn.Module):
             end_time=None,
             prompt_tokens=prompt_token_count,
             generation_tokens=gen_tokens,
-            segments=(
-                _parse_segments(task, full_text, prefix_text) if task != "asr" else None
-            ),
+            segments=segments,
+            finish_reason=finish_reason,
+            complete=complete,
+            raw_text=raw_text,
+            error=error,
         )
 
     def _load_audio(

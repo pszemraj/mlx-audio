@@ -237,7 +237,14 @@ def save_as_json(segments, output_path: str):
             # Add speaker_id if available
             if "speaker_id" in s:
                 seg["speaker_id"] = s["speaker_id"]
+            if "speaker_id_source" in s:
+                seg["speaker_id_source"] = s["speaker_id_source"]
             result["segments"].append(seg)
+
+    for field in ("finish_reason", "complete", "raw_text"):
+        value = getattr(segments, field, None)
+        if value is not None:
+            result[field] = value
 
     with (
         open(f"{output_path}.json", "w", encoding="utf-8")
@@ -313,6 +320,10 @@ def generate_transcription(
         language = None
         prompt_tokens = 0
         generation_tokens = 0
+        finish_reason = None
+        complete = None
+        raw_text = None
+        terminal_error = None
         for result in model.generate(audio, verbose=verbose, **kwargs):
             result_segments = getattr(result, "segments", None)
             if result_segments is not None:
@@ -339,6 +350,18 @@ def generate_transcription(
                 prompt_tokens = result.prompt_tokens
             if hasattr(result, "generation_tokens") and result.generation_tokens > 0:
                 generation_tokens = result.generation_tokens
+            if getattr(result, "finish_reason", None) is not None:
+                finish_reason = result.finish_reason
+            if getattr(result, "complete", None) is not None:
+                complete = result.complete
+            if getattr(result, "raw_text", None) is not None:
+                raw_text = result.raw_text
+            if getattr(result, "error", None) is not None:
+                terminal_error = result.error
+
+        if terminal_error:
+            detail = f" Partial raw text: {raw_text!r}" if raw_text else ""
+            raise RuntimeError(f"{terminal_error}{detail}")
 
         stream_end_time = time.time()
         stream_duration = stream_end_time - start_time
@@ -358,10 +381,19 @@ def generate_transcription(
             generation_tps=(
                 generation_tokens / stream_duration if stream_duration > 0 else 0
             ),
+            finish_reason=finish_reason,
+            complete=complete,
+            raw_text=raw_text,
         )
     else:
         segments = model.generate(
             audio, verbose=verbose, generation_stream=generation_stream, **kwargs
+        )
+
+    if getattr(segments, "complete", None) is False:
+        print(
+            "[WARNING] Transcription reached its token limit before EOS; "
+            "the saved plain-ASR text is partial."
         )
 
     if verbose:

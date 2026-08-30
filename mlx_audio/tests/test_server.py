@@ -511,6 +511,10 @@ def test_stt_streamed_verbose_json_accumulates_text_and_segments(
             is_final=True,
             language="en",
             segments=timestamp_segments,
+            finish_reason="stop",
+            complete=True,
+            raw_text=None,
+            error=None,
         )
 
     mock_stt_model = MagicMock()
@@ -532,6 +536,122 @@ def test_stt_streamed_verbose_json_accumulates_text_and_segments(
         "text": "hello world",
         "language": "en",
         "segments": timestamp_segments,
+        "finish_reason": "stop",
+        "complete": True,
+    }
+
+
+@pytest.mark.parametrize("response_format", ["text", "json"])
+def test_plain_asr_length_metadata_uses_headers_for_narrow_responses(
+    client, mock_model_provider, response_format
+):
+    mock_stt_model = MagicMock()
+    mock_stt_model.generate = MagicMock(
+        return_value={
+            "text": "partial transcript",
+            "finish_reason": "length",
+            "complete": False,
+            "raw_text": "partial transcript",
+        }
+    )
+    mock_model_provider.load_model = MagicMock(return_value=mock_stt_model)
+
+    response = client.post(
+        "/v1/audio/transcriptions",
+        files={"file": ("test.mp3", _make_transcription_audio_buffer(), "audio/mp3")},
+        data={"model": "test_stt_model", "response_format": response_format},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["X-MLX-Audio-Finish-Reason"] == "length"
+    assert response.headers["X-MLX-Audio-Complete"] == "false"
+
+
+def test_timestamp_requests_use_task_aware_token_default(client, mock_model_provider):
+    captured = {}
+
+    def generate(path, *, task=None, max_tokens=None):
+        del path
+        captured.update(task=task, max_tokens=max_tokens)
+        return {"text": "hello [T:50]", "segments": []}
+
+    mock_stt_model = MagicMock()
+    mock_stt_model.generate = generate
+    mock_model_provider.load_model = MagicMock(return_value=mock_stt_model)
+
+    response = client.post(
+        "/v1/audio/transcriptions",
+        files={"file": ("test.mp3", _make_transcription_audio_buffer(), "audio/mp3")},
+        data={
+            "model": "test_stt_model",
+            "task": "timestamps",
+            "response_format": "json",
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured == {"task": "timestamps", "max_tokens": 10_000}
+
+
+def test_native_ndjson_preserves_partial_text_on_incomplete_error(
+    client, mock_model_provider
+):
+    class Incomplete(RuntimeError):
+        def __init__(self):
+            super().__init__("timestamps reached max_tokens=1 before EOS")
+            self.partial_text = "hello [T:50]"
+
+    def generate(path, *, task=None):
+        del path, task
+        raise Incomplete()
+
+    mock_stt_model = MagicMock()
+    mock_stt_model.generate = generate
+    mock_model_provider.load_model = MagicMock(return_value=mock_stt_model)
+
+    response = client.post(
+        "/v1/audio/transcriptions",
+        files={"file": ("test.mp3", _make_transcription_audio_buffer(), "audio/mp3")},
+        data={"model": "test_stt_model", "task": "timestamps"},
+    )
+
+    assert response.status_code == 200
+    terminal = json.loads(response.text)
+    assert terminal["is_final"] is True
+    assert terminal["complete"] is False
+    assert terminal["finish_reason"] == "length"
+    assert terminal["raw_text"] == "hello [T:50]"
+
+
+def test_verbose_json_maps_incomplete_transcription_to_422(client, mock_model_provider):
+    class Incomplete(RuntimeError):
+        def __init__(self):
+            super().__init__("timestamps reached max_tokens=1 before EOS")
+            self.partial_text = "hello [T:50]"
+
+    def generate(path, *, task=None):
+        del path, task
+        raise Incomplete()
+
+    mock_stt_model = MagicMock()
+    mock_stt_model.generate = generate
+    mock_model_provider.load_model = MagicMock(return_value=mock_stt_model)
+
+    response = client.post(
+        "/v1/audio/transcriptions",
+        files={"file": ("test.mp3", _make_transcription_audio_buffer(), "audio/mp3")},
+        data={
+            "model": "test_stt_model",
+            "task": "timestamps",
+            "response_format": "verbose_json",
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == {
+        "message": "timestamps reached max_tokens=1 before EOS",
+        "type": "Incomplete",
+        "partial_text": "hello [T:50]",
     }
 
 
@@ -587,9 +707,11 @@ def _make_non_streaming_generate(text):
 class MockChunk:
     """Structured streaming result with a .text attribute."""
 
-    def __init__(self, text, segments=None):
+    def __init__(self, text, segments=None, **metadata):
         self.text = text
         self.segments = segments
+        for key, value in metadata.items():
+            setattr(self, key, value)
 
 
 def _trackable(fn):
@@ -728,26 +850,46 @@ def test_realtime_ws_forwards_rich_task_and_preserves_segments(
         sample_rate=None,
         task="asr",
         word_timestamps=False,
+        max_tokens=1024,
     ):
         del audio, language, verbose, sample_rate
         assert stream
         assert task == "timestamps"
         assert word_timestamps is True
-        return iter([MockChunk("Hello"), MockChunk("", segments=segments)])
+        assert max_tokens == 10_000
+        return iter(
+            [
+                MockChunk("Hello"),
+                MockChunk(
+                    "",
+                    segments=segments,
+                    finish_reason="stop",
+                    complete=True,
+                ),
+            ]
+        )
 
     messages, mock_stt_model = _ws_send_audio_and_collect(
         client,
         mock_model_provider,
         gen_fn,
-        config_extra={"task": "timestamps", "word_timestamps": True},
+        config_extra={
+            "task": "timestamps",
+            "word_timestamps": True,
+            "max_tokens": 10_000,
+        },
     )
 
     completes = [m for m in messages if m.get("type") == "complete"]
     assert completes
     assert completes[-1]["segments"] == segments
+    assert completes[-1]["finish_reason"] == "stop"
+    assert completes[-1]["complete"] is True
     assert mock_stt_model.generate.call_args_list
     assert all(
-        kwargs["task"] == "timestamps" and kwargs["word_timestamps"] is True
+        kwargs["task"] == "timestamps"
+        and kwargs["word_timestamps"] is True
+        and kwargs["max_tokens"] == 10_000
         for _, kwargs in mock_stt_model.generate.call_args_list
     )
 

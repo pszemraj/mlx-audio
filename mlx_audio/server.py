@@ -328,6 +328,23 @@ def _validate_stt_generation_request(stt_model, gen_kwargs: Dict[str, Any]) -> N
     )
 
 
+def _stt_completion_metadata(value, *, include_error: bool = False) -> dict:
+    """Extract only concrete completion fields from a backend result."""
+    expected_types = {
+        "finish_reason": str,
+        "complete": bool,
+        "raw_text": str,
+    }
+    if include_error:
+        expected_types["error"] = str
+    metadata = {}
+    for field, expected_type in expected_types.items():
+        field_value = getattr(value, field, None)
+        if isinstance(field_value, expected_type):
+            metadata[field] = field_value
+    return metadata
+
+
 async def _preflight_stt_generation_request(payload: TranscriptionRequest) -> None:
     """Validate an STT request before a streaming response commits HTTP 200."""
     await _preflight_model_load(payload.model)
@@ -383,9 +400,17 @@ class STTExecutionAdapter(BaseModelExecutionAdapter):
                         segments = getattr(chunk, "segments", None)
                         if segments is not None:
                             chunk_data["segments"] = segments
+                        chunk_data.update(
+                            _stt_completion_metadata(chunk, include_error=True)
+                        )
                     request.emit_data(json.dumps(sanitize_for_json(chunk_data)) + "\n")
             elif not request.cancel_event.is_set():
-                request.emit_data(json.dumps(sanitize_for_json(result)) + "\n")
+                result_data = sanitize_for_json(result)
+                if isinstance(result_data, dict):
+                    for field in ("finish_reason", "complete", "raw_text"):
+                        if result_data.get(field) is None:
+                            result_data.pop(field, None)
+                request.emit_data(json.dumps(result_data) + "\n")
         finally:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
@@ -937,9 +962,23 @@ async def _stream_inference_results(
             raise
         # StreamingResponse has already committed its status, so report the
         # inference failure in-band rather than raising into the response body.
-        yield json.dumps(
-            {"error": {"message": str(exc), "type": type(exc).__name__}}
-        ) + "\n"
+        error = {"message": str(exc), "type": type(exc).__name__}
+        payload = {"error": error}
+        partial_text = getattr(exc, "partial_text", None)
+        if partial_text is None:
+            partial_text = getattr(exc, "raw_text", None)
+        if partial_text is not None:
+            payload.update(
+                {
+                    "is_final": True,
+                    "complete": False,
+                    "finish_reason": (
+                        "length" if hasattr(exc, "partial_text") else "stop"
+                    ),
+                    "raw_text": partial_text,
+                }
+            )
+        yield json.dumps(payload) + "\n"
     finally:
         handle.cancel()
 
@@ -1094,7 +1133,7 @@ async def stt_transcriptions(
     prefix_text: Optional[str] = Form(None),
     hotwords: Optional[List[str]] = Form(None),
     verbose: bool = Form(False),
-    max_tokens: int = Form(1024),
+    max_tokens: Optional[int] = Form(None),
     chunk_duration: float = Form(30.0),
     frame_threshold: int = Form(25),
     stream: bool = Form(False),
@@ -1122,6 +1161,12 @@ async def stt_transcriptions(
 
     See https://platform.openai.com/docs/api-reference/audio/createTranscription
     """
+    if max_tokens is None:
+        normalized_task = (task or "").lower().strip()
+        max_tokens = (
+            10_000 if normalized_task == "timestamps" or word_timestamps else 1024
+        )
+
     payload = TranscriptionRequest(
         model=model,
         language=language,
@@ -1197,15 +1242,40 @@ async def stt_transcriptions(
                             if key not in excluded_chunk_keys
                         }
                     )
+        except Exception as exc:
+            partial_text = getattr(exc, "partial_text", None)
+            if partial_text is None:
+                partial_text = getattr(exc, "raw_text", None)
+            if partial_text is not None:
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "message": str(exc),
+                        "type": type(exc).__name__,
+                        "partial_text": partial_text,
+                    },
+                ) from exc
+            raise
         finally:
             handle.cancel()
 
         full["text"] = accumulated
 
+        response_headers = {}
+        if full.get("finish_reason") is not None:
+            response_headers["X-MLX-Audio-Finish-Reason"] = str(full["finish_reason"])
+        if full.get("complete") is not None:
+            response_headers["X-MLX-Audio-Complete"] = str(full["complete"]).lower()
+
         if response_format == "text":
-            return PlainTextResponse((full.get("text") or "").strip())
+            return PlainTextResponse(
+                (full.get("text") or "").strip(), headers=response_headers
+            )
         if response_format == "json":
-            return JSONResponse({"text": (full.get("text") or "").strip()})
+            return JSONResponse(
+                {"text": (full.get("text") or "").strip()},
+                headers=response_headers,
+            )
         # verbose_json: full payload (text, segments, language, ...) as-is
         return JSONResponse(full)
 
@@ -1298,6 +1368,10 @@ async def _stream_transcription(
         accumulated = ""
         detected_language = language
         segments = None
+        finish_reason = None
+        complete = None
+        raw_text = None
+        terminal_error = None
         for chunk in result_iter:
             delta = (
                 chunk if isinstance(chunk, str) else getattr(chunk, "text", str(chunk))
@@ -1310,17 +1384,29 @@ async def _stream_transcription(
             chunk_segments = getattr(chunk, "segments", None)
             if chunk_segments is not None:
                 segments = sanitize_for_json(chunk_segments)
+            metadata = _stt_completion_metadata(chunk, include_error=True)
+            finish_reason = metadata.get("finish_reason", finish_reason)
+            complete = metadata.get("complete", complete)
+            raw_text = metadata.get("raw_text", raw_text)
+            terminal_error = metadata.get("error", terminal_error)
             await websocket.send_json({"type": "delta", "delta": delta})
 
-        await websocket.send_json(
-            {
-                "type": "complete",
-                "text": accumulated,
-                "segments": segments,
-                "language": detected_language,
-                "is_partial": is_partial,
-            }
-        )
+        terminal = {
+            "type": "complete",
+            "text": accumulated,
+            "segments": segments,
+            "language": detected_language,
+            "is_partial": is_partial,
+        }
+        for key, value in (
+            ("finish_reason", finish_reason),
+            ("complete", complete),
+            ("raw_text", raw_text),
+            ("error", terminal_error),
+        ):
+            if value is not None:
+                terminal[key] = value
+        await websocket.send_json(terminal)
     else:
         tmp_path = f"/tmp/realtime_{time.time()}.mp3"
         audio_write(tmp_path, audio_array, sample_rate)
@@ -1345,6 +1431,7 @@ async def _stream_transcription(
                     "segments": segments,
                     "language": getattr(result, "language", language),
                     "is_partial": is_partial,
+                    **_stt_completion_metadata(result),
                 }
             )
         finally:
@@ -1375,9 +1462,15 @@ async def stt_realtime_transcriptions(websocket: WebSocket):
                 "hotwords",
                 "context",
                 "word_timestamps",
+                "max_tokens",
             )
             if key in config and config[key] is not None
         }
+        if "max_tokens" not in generation_options and (
+            str(generation_options.get("task", "")).lower().strip() == "timestamps"
+            or generation_options.get("word_timestamps") is True
+        ):
+            generation_options["max_tokens"] = 10_000
 
         print(
             f"Configuration received: model={model_name}, language={language}, sample_rate={sample_rate}, streaming={streaming}"

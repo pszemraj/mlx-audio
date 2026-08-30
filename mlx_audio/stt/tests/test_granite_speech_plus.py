@@ -26,6 +26,7 @@ from mlx_audio.stt.models.granite_speech.granite_speech import (
     ConformerAttention,
     CTCEncoder,
     EncoderProjector,
+    IncompleteTranscription,
     Model,
     StreamingResult,
     StructuredTranscriptError,
@@ -754,6 +755,119 @@ def test_stream_final_result_carries_parsed_segments(
     assert all(result.end_time is None for result in results)
     assert results[-1].is_final
     assert results[-1].segments == expected_segments
+    assert results[-1].finish_reason == "stop"
+    assert results[-1].complete is True
+
+
+def _generation_stub(pieces):
+    class SequenceTokenizer:
+        eos_token_id = 99
+        clean_up_tokenization_spaces = False
+
+        def decode(self, token_ids, **kwargs):
+            del kwargs
+            return "".join(pieces[token_id] for token_id in token_ids)
+
+    return SimpleNamespace(
+        is_plus=True,
+        config=SimpleNamespace(model_type="granite_speech_plus"),
+        _tokenizer=SequenceTokenizer(),
+        _load_audio=lambda audio, sample_rate: audio,
+        _extract_features=lambda audio: (mx.zeros((1, 1, 160)), 1),
+        get_audio_features=lambda features: mx.zeros((1, 1, 4)),
+        _build_prompt=lambda *args, **kwargs: mx.array([0]),
+        _build_inputs_embeds=lambda *args, **kwargs: mx.zeros((1, 1, 4)),
+    )
+
+
+def test_nonstream_rich_generation_rejects_length_exhaustion(monkeypatch):
+    import mlx_audio.lm.generate as lm_generate
+
+    monkeypatch.setattr(
+        lm_generate,
+        "generate_step",
+        lambda **kwargs: iter([(10, None)]),
+    )
+
+    with pytest.raises(IncompleteTranscription) as exc_info:
+        Model.generate(
+            _generation_stub({10: "hello [T:50]"}),
+            mx.zeros((1,)),
+            task="timestamps",
+            max_tokens=1,
+        )
+
+    assert exc_info.value.partial_text == "hello [T:50]"
+    assert exc_info.value.max_tokens == 1
+
+
+def test_nonstream_asr_marks_partial_output_on_length_exhaustion(monkeypatch):
+    import mlx_audio.lm.generate as lm_generate
+
+    monkeypatch.setattr(
+        lm_generate,
+        "generate_step",
+        lambda **kwargs: iter([(10, None)]),
+    )
+
+    result = Model.generate(
+        _generation_stub({10: "partial transcript"}),
+        mx.zeros((1,)),
+        max_tokens=1,
+    )
+
+    assert result.text == "partial transcript"
+    assert result.finish_reason == "length"
+    assert result.complete is False
+    assert result.raw_text == "partial transcript"
+
+
+def test_nonstream_asr_marks_eos_completion(monkeypatch):
+    import mlx_audio.lm.generate as lm_generate
+
+    monkeypatch.setattr(
+        lm_generate,
+        "generate_step",
+        lambda **kwargs: iter([(10, None), (99, None)]),
+    )
+
+    result = Model.generate(
+        _generation_stub({10: "complete transcript"}),
+        mx.zeros((1,)),
+        max_tokens=2,
+    )
+
+    assert result.text == "complete transcript"
+    assert result.finish_reason == "stop"
+    assert result.complete is True
+    assert result.raw_text is None
+
+
+def test_stream_rich_generation_emits_terminal_incomplete_result(monkeypatch):
+    import mlx_audio.lm.generate as lm_generate
+
+    monkeypatch.setattr(
+        lm_generate,
+        "generate_step",
+        lambda **kwargs: iter([(10, None)]),
+    )
+
+    results = list(
+        Model._stream_generate(
+            _generation_stub({10: "hello [T:50]"}),
+            mx.zeros((1,)),
+            task="timestamps",
+            max_tokens=1,
+        )
+    )
+    final = results[-1]
+
+    assert final.is_final
+    assert final.finish_reason == "length"
+    assert final.complete is False
+    assert final.raw_text == "hello [T:50]"
+    assert "max_tokens=1" in final.error
+    assert final.segments is None
 
 
 def test_streamed_timestamp_cli_uses_final_structured_segments(tmp_path):
@@ -779,6 +893,93 @@ def test_streamed_timestamp_cli_uses_final_structured_segments(tmp_path):
     assert "00:00:00,000 --> 00:00:00,500" in subtitle
     assert "hello" in subtitle
     assert "[T:50]" not in subtitle
+
+
+def test_streamed_cli_preserves_plain_asr_length_metadata(tmp_path, capsys):
+    def generate(audio, *, stream=False, verbose=False):
+        del audio, stream, verbose
+        yield StreamingResult(
+            "partial transcript",
+            True,
+            None,
+            None,
+            finish_reason="length",
+            complete=False,
+            raw_text="partial transcript",
+        )
+
+    output_path = tmp_path / "partial"
+    result = generate_transcription(
+        model=SimpleNamespace(generate=generate),
+        audio=mx.zeros((1,)),
+        output_path=str(output_path),
+        format="json",
+        stream=True,
+    )
+
+    import json
+
+    saved = json.loads(output_path.with_suffix(".json").read_text())
+    assert result.complete is False
+    assert saved["finish_reason"] == "length"
+    assert saved["complete"] is False
+    assert saved["raw_text"] == "partial transcript"
+    assert "saved plain-ASR text is partial" in capsys.readouterr().out
+
+
+def test_streamed_cli_does_not_write_failed_rich_transcript(tmp_path):
+    def generate(audio, *, stream=False, verbose=False):
+        del audio, stream, verbose
+        yield StreamingResult(
+            "hello [T:50]",
+            True,
+            None,
+            None,
+            finish_reason="length",
+            complete=False,
+            raw_text="hello [T:50]",
+            error="timestamp generation reached max_tokens=1 before EOS",
+        )
+
+    output_path = tmp_path / "incomplete-timestamps"
+    with pytest.raises(RuntimeError, match="Partial raw text"):
+        generate_transcription(
+            model=SimpleNamespace(generate=generate),
+            audio=mx.zeros((1,)),
+            output_path=str(output_path),
+            format="json",
+            stream=True,
+        )
+
+    assert not output_path.with_suffix(".json").exists()
+
+
+def test_cli_json_preserves_inferred_speaker_provenance(tmp_path):
+    def generate(audio, verbose=False, generation_stream=None):
+        del audio, verbose, generation_stream
+        return SimpleNamespace(
+            text="continued turn",
+            segments=[
+                {
+                    "speaker_id": 2,
+                    "speaker_id_source": "inferred_from_prefix",
+                    "text": "continued turn",
+                }
+            ],
+        )
+
+    output_path = tmp_path / "speaker-provenance"
+    generate_transcription(
+        model=SimpleNamespace(generate=generate),
+        audio=mx.zeros((1,)),
+        output_path=str(output_path),
+        format="json",
+    )
+
+    import json
+
+    saved = json.loads(output_path.with_suffix(".json").read_text())
+    assert saved["segments"][0]["speaker_id_source"] == "inferred_from_prefix"
 
 
 def test_untimed_stream_does_not_create_zero_duration_cues(tmp_path, capsys):

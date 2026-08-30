@@ -133,7 +133,7 @@ curl -X POST http://localhost:8000/v1/audio/transcriptions \
 | `prompt` | string | `null` | Model-specific transcription prompt |
 | `prefix_text` | string | `null` | Prior transcript for models with incremental decoding |
 | `hotwords` | string/list | `null` | One or more contextual-biasing terms; repeat the form field for a list |
-| `max_tokens` | int | `1024` | Maximum output tokens |
+| `max_tokens` | int | `1024` (`10000` for timestamps) | Maximum output tokens; an explicit value always wins |
 | `stream` | bool | `false` | Stream results as NDJSON |
 | `context` | string | `null` | Hotwords or metadata to guide transcription |
 | `word_timestamps` | bool | `false` | Request word timings; selects Granite Plus timestamp mode |
