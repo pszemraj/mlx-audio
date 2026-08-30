@@ -103,17 +103,19 @@ class NaiveStreamingDetokenizer:
 
     @property
     def text(self):
+        has_incomplete_codepoint = False
         if self._current_tokens:
             current_text = self.tokenizer.decode(
                 self._current_tokens, **self.decode_kwargs
             )
-            if current_text.endswith("\ufffd"):
+            has_incomplete_codepoint = current_text.endswith("\ufffd")
+            if has_incomplete_codepoint:
                 current_text = current_text[:-1]
             elif self.clean_spaces and current_text.endswith(" "):
                 current_text = current_text[:-1]
             self._current_text = current_text
 
-        if self._current_text.endswith("\n"):
+        if not has_incomplete_codepoint and self._current_text.endswith("\n"):
             self._text += self._current_text
             self._current_tokens = []
             self._current_text = ""
@@ -122,8 +124,9 @@ class NaiveStreamingDetokenizer:
 
     @property
     def last_segment(self):
-        segment = self.text[self.offset :]
-        self.offset = len(self.text)
+        text = self.text
+        segment = text[self.offset :]
+        self.offset = len(text)
         return segment
 
 

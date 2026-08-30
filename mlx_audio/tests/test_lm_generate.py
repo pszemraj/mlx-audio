@@ -89,29 +89,60 @@ def test_generate_step_negative_max_tokens_is_unbounded():
     assert len(produced) == 40
 
 
-def test_streaming_detokenizer_buffers_split_utf8_codepoints():
+@pytest.mark.parametrize(
+    ("pieces", "tokens", "expected"),
+    [
+        (
+            {1: b"hello ", 2: b"\xe4", 3: b"\xb8", 4: b"\x96"},
+            [1, 2, 3, 4],
+            "hello \u4e16",
+        ),
+        (
+            {1: b"hi", 2: b"\n\xe4\xb8", 3: b"\x96"},
+            [1, 2, 3],
+            "hi\n\u4e16",
+        ),
+    ],
+)
+def test_streaming_detokenizer_buffers_split_utf8_codepoints(
+    pieces, tokens, expected
+):
     class ByteTokenizer:
         clean_up_tokenization_spaces = False
-        pieces = {
-            1: b"hello ",
-            2: b"\xe4",
-            3: b"\xb8",
-            4: b"\x96",
-        }
 
         def decode(self, token_ids, **kwargs):
             del kwargs
-            encoded = b"".join(self.pieces[token_id] for token_id in token_ids)
+            encoded = b"".join(pieces[token_id] for token_id in token_ids)
             return encoded.decode("utf-8", errors="replace")
 
     detokenizer = NaiveStreamingDetokenizer(ByteTokenizer())
     deltas = []
-    for token in [1, 2, 3, 4]:
+    for token in tokens:
         detokenizer.add_token(token)
         deltas.append(detokenizer.last_segment)
     detokenizer.finalize()
     deltas.append(detokenizer.last_segment)
 
-    assert "".join(deltas) == "hello \u4e16"
+    assert "".join(deltas) == expected
     assert "\ufffd" not in "".join(deltas)
-    assert detokenizer.text == "hello \u4e16"
+    assert detokenizer.text == expected
+
+
+def test_streaming_detokenizer_last_segment_decodes_once():
+    class CountingTokenizer:
+        clean_up_tokenization_spaces = False
+
+        def __init__(self):
+            self.decode_calls = 0
+
+        def decode(self, token_ids, **kwargs):
+            del kwargs
+            self.decode_calls += 1
+            return "".join(str(token_id) for token_id in token_ids)
+
+    tokenizer = CountingTokenizer()
+    detokenizer = NaiveStreamingDetokenizer(tokenizer)
+    detokenizer.add_token(1)
+
+    assert detokenizer.last_segment == "1"
+    assert tokenizer.decode_calls == 1
