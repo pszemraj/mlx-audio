@@ -3,12 +3,15 @@
 Each supporting model folds a structured ``hotwords`` list into its own native
 prompt field inside its ``generate`` forward loop; models without a hook ignore
 it (silent drop). These tests stay weight-free: they exercise the shared merge
-helper and introspect each model's ``generate`` signature.
+helper, inspect each model's ``generate`` signature, and observe the value at
+the two prompt boundaries that regressed when the helper was called twice.
 """
 
 import ast
-import inspect
 from pathlib import Path
+from types import SimpleNamespace
+
+import mlx.core as mx
 
 from mlx_audio.stt.utils import merge_hotwords
 
@@ -68,7 +71,58 @@ class TestGenerateAcceptsHotwords:
             assert "hotwords" in args, f"{rel_path}: generate() missing hotwords"
             assert native in args, f"{rel_path}: generate() missing {native}"
 
-    def test_merge_helper_is_used_in_each_model(self):
-        for rel_path in _NATIVE_FIELD:
-            src = (_MODELS_DIR / rel_path).read_text()
-            assert "merge_hotwords" in src, f"{rel_path}: does not call merge_hotwords"
+
+def test_vibevoice_prompt_boundary_receives_each_hotword_once():
+    from mlx_audio.stt.models.vibevoice_asr.vibevoice_asr import Model
+
+    captured = {}
+
+    def build_prompt_tokens(speech_features, audio_duration, context):
+        del speech_features, audio_duration
+        captured["context"] = context
+        return mx.zeros((1, 1), dtype=mx.int32), mx.zeros((1, 1), dtype=mx.bool_)
+
+    stub = SimpleNamespace(
+        _preprocess_audio=lambda audio, sampling_rate: mx.zeros((1, 24_000)),
+        encode_speech=lambda audio, verbose: mx.zeros((1, 1, 1)),
+        _build_prompt_tokens=build_prompt_tokens,
+        stream_generate=lambda **kwargs: iter(()),
+        tokenizer=SimpleNamespace(decode=lambda *args, **kwargs: ""),
+        parse_transcription=lambda text: [],
+    )
+
+    Model.generate(
+        stub,
+        mx.zeros((1,)),
+        context="Meeting transcript",
+        hotwords=["Granite", "MLX"],
+    )
+
+    assert captured["context"] == "Meeting transcript\nGranite, MLX"
+
+
+def test_moss_prompt_boundary_receives_each_hotword_once():
+    from mlx_audio.stt.models.moss_transcribe_diarize.moss_transcribe_diarize import (
+        Model,
+    )
+
+    captured = {}
+    sentinel = object()
+
+    def stream_transcribe(audio, **kwargs):
+        del audio
+        captured["prompt"] = kwargs["prompt"]
+        return sentinel
+
+    stub = SimpleNamespace(_stream_transcribe=stream_transcribe)
+
+    result = Model.generate(
+        stub,
+        mx.zeros((1,)),
+        prompt="Meeting transcript",
+        hotwords=["Granite", "MLX"],
+        stream=True,
+    )
+
+    assert result is sentinel
+    assert captured["prompt"] == "Meeting transcript\nGranite, MLX"

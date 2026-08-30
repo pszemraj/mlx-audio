@@ -683,11 +683,6 @@ class Model(nn.Module):
         # VibeVoice biases toward rare vocabulary via the context string.
         context = merge_hotwords(context, hotwords)
 
-        from mlx_audio.stt.utils import merge_hotwords
-
-        # VibeVoice biases toward rare vocabulary via the context string.
-        context = merge_hotwords(context, hotwords)
-
         start_time = time.time()
 
         # Preprocess audio
