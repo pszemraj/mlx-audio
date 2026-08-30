@@ -1131,6 +1131,9 @@ async def stt_transcriptions(
     if response_format in ("text", "json", "verbose_json"):
         full: dict = {}
         accumulated = ""
+        # These fields describe transport chunks, not the completed verbose_json
+        # transcription. Timestamp details remain in segments and words.
+        excluded_chunk_keys = {"text", "accumulated", "start", "end", "is_final"}
         try:
             while True:
                 chunk = await _next_inference_chunk(handle)
@@ -1159,7 +1162,7 @@ async def stt_transcriptions(
                         {
                             key: value
                             for key, value in obj.items()
-                            if key not in {"text", "accumulated"}
+                            if key not in excluded_chunk_keys
                         }
                     )
         finally:

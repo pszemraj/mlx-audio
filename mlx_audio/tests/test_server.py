@@ -473,7 +473,7 @@ def test_stt_streamed_verbose_json_accumulates_text_and_segments(
             start_time=None,
             end_time=None,
             is_final=True,
-            language=None,
+            language="en",
             segments=timestamp_segments,
         )
 
@@ -492,8 +492,11 @@ def test_stt_streamed_verbose_json_accumulates_text_and_segments(
     )
 
     assert response.status_code == 200
-    assert response.json()["text"] == "hello world"
-    assert response.json()["segments"] == timestamp_segments
+    assert response.json() == {
+        "text": "hello world",
+        "language": "en",
+        "segments": timestamp_segments,
+    }
 
 
 # ---------------------------------------------------------------------------
