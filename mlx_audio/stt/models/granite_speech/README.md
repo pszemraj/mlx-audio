@@ -83,6 +83,11 @@ print(result.text)
 
 The plus checkpoint selects its mode through the prompt; the `task` parameter picks the right one. Audio limits from the model card: up to 9 minutes for `asr`/`saa`, up to 3.5 minutes for `timestamps`. Timestamps mode emits roughly one tag per word, so budget `max_tokens` accordingly. Plus-mode transcripts have no punctuation or casing.
 
+The canonical `saa` and `timestamps` prompts define their output schemas and
+cannot be replaced with `prompt=`. Use `hotwords=` for contextual biasing, or
+use `task="asr"` when supplying a custom instruction. Rich modes fail closed if
+the checkpoint returns plain or malformed text instead of the requested tags.
+
 ```python
 from mlx_audio.stt import load
 

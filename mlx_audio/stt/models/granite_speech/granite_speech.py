@@ -58,6 +58,14 @@ class UnsupportedTranscriptionTask(ValueError):
     """The loaded checkpoint cannot perform the requested transcription task."""
 
 
+class StructuredTranscriptError(RuntimeError):
+    """A rich transcription did not contain the requested structured syntax."""
+
+    def __init__(self, message: str, *, raw_text: str) -> None:
+        super().__init__(message)
+        self.raw_text = raw_text
+
+
 def _normalize_task(task: str, *, word_timestamps: bool = False) -> str:
     normalized = (task or "asr").lower().strip()
     if normalized not in TASK_PROMPTS:
@@ -118,14 +126,7 @@ def _parse_timestamps(text: str, prefix_text: Optional[str] = None) -> List[dict
             words.append({"word": tok, "start": cursor, "end": end})
         cursor = end
 
-    # A generation cut off before its final timestamp still contains useful
-    # transcript text, but there is no reliable end time to put in `words`.
-    trailing_text = parts[-1].strip()
-    if trailing_text == "_":
-        trailing_text = ""
     transcript_parts = [word["word"] for word in words]
-    if trailing_text:
-        transcript_parts.append(trailing_text)
     if not transcript_parts:
         return []
     return [
@@ -139,11 +140,16 @@ def _parse_timestamps(text: str, prefix_text: Optional[str] = None) -> List[dict
 
 
 def _resolve_prompt(task: str, prompt: Optional[str], language: Optional[str]) -> str:
-    # Priority: explicit prompt > rich-transcription task > translation via
-    # language > default ASR. A rich-transcription task must not be overridden
-    # when a caller also supplies a translation language.
+    # Rich tasks are prompt-controlled, so their canonical prompts are part of
+    # the output-schema contract. Custom prompts remain available for ASR.
     task = _normalize_task(task)
     if prompt is not None:
+        if task != "asr":
+            raise ValueError(
+                f"prompt cannot override task={task!r}. Use hotwords=[...] for "
+                "contextual biasing, or use task='asr' for an unconstrained "
+                "custom instruction."
+            )
         return prompt
     if task != "asr":
         return TASK_PROMPTS[task]
@@ -151,6 +157,35 @@ def _resolve_prompt(task: str, prompt: Optional[str], language: Optional[str]) -
         lang_name = LANGUAGE_CODES.get(language.lower(), language)
         return f"Translate the speech to {lang_name}."
     return TASK_PROMPTS["asr"]
+
+
+def _validate_structured_output(
+    task: str, text: str, prefix_text: Optional[str] = None
+) -> None:
+    """Reject rich-mode fallback or malformed text before schema parsing."""
+    if task == "timestamps":
+        if not _TS_RE.search(text):
+            raise StructuredTranscriptError(
+                "Granite timestamp mode produced no [T:N] tags. The model may "
+                "have fallen back to plain ASR.",
+                raw_text=text,
+            )
+        trailing = _TS_RE.split(text)[-1].strip()
+        if trailing and trailing != "_":
+            raise StructuredTranscriptError(
+                "Granite timestamp mode ended with untimestamped text. The "
+                "structured transcript is malformed.",
+                raw_text=text,
+            )
+    elif task == "saa":
+        has_generated_tag = bool(_SPEAKER_RE.search(text))
+        has_prefix_tag = bool(_SPEAKER_RE.search(prefix_text or ""))
+        if not has_generated_tag and not (has_prefix_tag and text.strip()):
+            raise StructuredTranscriptError(
+                "Granite speaker-attribution mode produced no [Speaker N]: "
+                "tags and no attributable continuation.",
+                raw_text=text,
+            )
 
 
 def _parse_segments(
@@ -162,7 +197,10 @@ def _parse_segments(
             # it belongs to the last speaker in the prefix.
             tags = _SPEAKER_RE.findall(prefix_text)
             if tags:
-                text = f"[Speaker {tags[-1]}]: {text}"
+                segments = _parse_saa(f"[Speaker {tags[-1]}]: {text}")
+                if segments:
+                    segments[0]["speaker_id_source"] = "inferred_from_prefix"
+                return segments
         return _parse_saa(text)
     if task == "timestamps":
         return _parse_timestamps(text, prefix_text)
@@ -648,7 +686,6 @@ class Model(nn.Module):
         **_: object,
     ) -> None:
         """Validate cheap checkpoint capability constraints before generation."""
-        del prompt
         normalized_task = _normalize_task(task, word_timestamps=word_timestamps)
         if normalized_task != "asr" and not self.is_plus:
             raise UnsupportedTranscriptionTask(
@@ -657,6 +694,7 @@ class Model(nn.Module):
                 f"model_type={self.config.model_type!r}. Load "
                 "ibm-granite/granite-speech-4.1-2b-plus or use task='asr'."
             )
+        _resolve_prompt(normalized_task, prompt, language=None)
 
     def model_quant_predicate(self, p: str, m: nn.Module) -> bool:
         return not (p.startswith("encoder") or p.startswith("projector"))
@@ -939,6 +977,8 @@ class Model(nn.Module):
             tokens.append(token)
 
         text = self._tokenizer.decode(tokens, skip_special_tokens=True)
+        if task != "asr":
+            _validate_structured_output(task, text, prefix_text)
         elapsed = time.time() - start_time
         gen_tokens = len(tokens)
 
@@ -1036,6 +1076,8 @@ class Model(nn.Module):
 
         detokenizer.finalize()
         full_text = detokenizer.text
+        if task != "asr":
+            _validate_structured_output(task, full_text, prefix_text)
         yield StreamingResult(
             text=detokenizer.last_segment,
             is_final=True,

@@ -28,11 +28,13 @@ from mlx_audio.stt.models.granite_speech.granite_speech import (
     EncoderProjector,
     Model,
     StreamingResult,
+    StructuredTranscriptError,
     UnsupportedTranscriptionTask,
     _parse_saa,
     _parse_segments,
     _parse_timestamps,
     _resolve_prompt,
+    _validate_structured_output,
 )
 
 HIDDEN_DIM = 8
@@ -166,12 +168,12 @@ class TestOutputParsers:
         )
         assert segments[0]["text"] == "first second third fourth"
 
-    def test_parse_timestamps_preserves_trailing_untimed_text(self):
+    def test_parse_timestamps_does_not_assign_time_to_trailing_text(self):
         segments = _parse_timestamps("hello [T:50] trailing words")
 
         assert segments == [
             {
-                "text": "hello trailing words",
+                "text": "hello",
                 "start": 0.0,
                 "end": 0.5,
                 "words": [{"word": "hello", "start": 0.0, "end": 0.5}],
@@ -229,7 +231,13 @@ class TestOutputParsers:
             "and then the meeting ended",
             prefix_text="[Speaker 1]: hello [Speaker 2]: hi there",
         )
-        assert segments == [{"speaker_id": 2, "text": "and then the meeting ended"}]
+        assert segments == [
+            {
+                "speaker_id": 2,
+                "speaker_id_source": "inferred_from_prefix",
+                "text": "and then the meeting ended",
+            }
+        ]
 
     def test_tagged_saa_continuation_ignores_prefix(self):
         segments = _parse_segments(
@@ -376,8 +384,13 @@ def test_base_checkpoint_rejects_word_timestamp_alias_before_generation():
 
 
 class TestResolvePrompt:
-    def test_explicit_prompt_wins(self):
-        assert _resolve_prompt("saa", "custom", "fr") == "custom"
+    def test_asr_permits_explicit_prompt(self):
+        assert _resolve_prompt("asr", "custom", "fr") == "custom"
+
+    @pytest.mark.parametrize("task", ["saa", "timestamps"])
+    def test_rich_task_rejects_explicit_prompt(self, task):
+        with pytest.raises(ValueError, match="prompt cannot override"):
+            _resolve_prompt(task, "custom", "fr")
 
     def test_rich_task_beats_translation_language(self):
         assert _resolve_prompt("saa", None, "en") == TASK_PROMPTS["saa"]
@@ -392,6 +405,38 @@ class TestResolvePrompt:
     def test_unknown_task_raises(self):
         with pytest.raises(ValueError, match="Unknown task"):
             _resolve_prompt("diarize", None, None)
+
+
+@pytest.mark.parametrize("task", ["saa", "timestamps"])
+def test_plus_request_validator_rejects_custom_rich_prompt(task):
+    plus_model = SimpleNamespace(
+        is_plus=True,
+        config=SimpleNamespace(model_type="granite_speech_plus"),
+    )
+
+    with pytest.raises(ValueError, match="prompt cannot override"):
+        Model.validate_generation_request(plus_model, task=task, prompt="custom")
+
+
+@pytest.mark.parametrize("task", ["saa", "timestamps"])
+def test_structured_output_rejects_plain_asr_fallback(task):
+    with pytest.raises(StructuredTranscriptError) as exc_info:
+        _validate_structured_output(task, "plain transcript")
+
+    assert exc_info.value.raw_text == "plain transcript"
+
+
+def test_saa_output_allows_tagless_continuation_with_tagged_prefix():
+    _validate_structured_output(
+        "saa",
+        "continued turn",
+        prefix_text="[Speaker 2]: earlier turn",
+    )
+
+
+def test_timestamp_output_rejects_untimed_trailing_text():
+    with pytest.raises(StructuredTranscriptError, match="untimestamped"):
+        _validate_structured_output("timestamps", "hello [T:50] trailing words")
 
 
 def test_cli_omits_language_to_preserve_model_default(tmp_path):
