@@ -324,16 +324,17 @@ class TestAudioIOFormats:
 class TestAudioIOEdgeCases:
     """Test edge cases and error handling."""
 
-    @pytest.mark.skipif(not FFMPEG_AVAILABLE, reason="ffmpeg not installed")
-    def test_clipping(self, tmp_path):
+    def test_clipping(self):
         """Test that values outside [-1, 1] are clipped."""
         samplerate = 16000
         # Create data with values outside [-1, 1]
         data = np.array([1.5, -1.5, 0.5, -0.5], dtype=np.float32)
 
-        output_file = tmp_path / "test_clipped.ogg"
-        write(output_file, data, samplerate, format="ogg")
-        assert output_file.exists()
+        output = io.BytesIO()
+        write(output, data, samplerate, format="raw")
+
+        encoded = np.frombuffer(output.getvalue(), dtype=np.int16)
+        np.testing.assert_array_equal(encoded, [32767, -32767, 16383, -16383])
 
     @pytest.mark.skipif(not FFMPEG_AVAILABLE, reason="ffmpeg not installed")
     def test_empty_audio(self, tmp_path):
