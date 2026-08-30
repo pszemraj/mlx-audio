@@ -3,8 +3,9 @@
 The plus checkpoint concatenates intermediate Conformer layer outputs onto the
 final encoder output (``cat_hidden_layers``), adds a system turn and
 ``prefix_text`` to the prompt, and emits ``[Speaker N]:`` / ``[T:N]`` tags that
-are parsed into the repo's ``segments`` schema. An optional parity test against
-``transformers`` runs only where torch is installed.
+are parsed into the repo's ``segments`` schema. Mandatory Torch/MLX numerical
+coverage lives in ``tests/model_parity/test_granite_speech_plus.py`` so this
+weight-free suite does not silently skip its reference contract.
 """
 
 from types import SimpleNamespace
@@ -1027,64 +1028,3 @@ def test_granite_streaming_language_is_unknown_by_default():
     result = StreamingResult("bonjour", True, None, None)
 
     assert result.language is None
-
-
-def test_encoder_parity_with_transformers_plus():
-    torch = pytest.importorskip("torch")
-    pytest.importorskip("transformers")
-    try:
-        from transformers.models.granite_speech_plus import (
-            modeling_granite_speech_plus as hf_mod,
-        )
-    except ImportError:
-        pytest.skip("transformers build lacks granite_speech_plus")
-
-    hf_config_cls = getattr(hf_mod, "GraniteSpeechPlusEncoderConfig", None)
-    if hf_config_cls is None:
-        from transformers.models.granite_speech_plus import (
-            configuration_granite_speech_plus as hf_cfg_mod,
-        )
-
-        hf_config_cls = hf_cfg_mod.GraniteSpeechPlusEncoderConfig
-
-    params = dict(
-        input_dim=4,
-        # Match the real checkpoint's exported layer 3 of 10. In Transformers,
-        # exporting the midpoint aliases an in-place update and is not a stable
-        # reference behavior for the pre-injection hidden state.
-        num_layers=10,
-        hidden_dim=HIDDEN_DIM,
-        feedforward_mult=2,
-        num_heads=2,
-        dim_head=4,
-        output_dim=4,
-        context_size=8,
-        max_pos_emb=16,
-        dropout=0.0,
-        conv_kernel_size=5,
-        conv_expansion_factor=2,
-        cat_hidden_layers=[3],
-    )
-    torch.manual_seed(0)
-    hf_encoder = hf_mod.GraniteSpeechPlusCTCEncoder(hf_config_cls(**params)).eval()
-    mlx_encoder = CTCEncoder(EncoderConfig(**params))
-
-    weights = {
-        f"encoder.{k}": mx.array(v.detach().numpy())
-        for k, v in hf_encoder.state_dict().items()
-    }
-    weights = Model.sanitize(weights)
-    mlx_encoder.load_weights(
-        [(k.removeprefix("encoder."), v) for k, v in weights.items()], strict=True
-    )
-
-    x = np.random.default_rng(0).standard_normal((1, 8, 4)).astype(np.float32)
-    with torch.no_grad():
-        hf_out = hf_encoder(torch.from_numpy(x))
-    if hasattr(hf_out, "last_hidden_state"):
-        hf_out = hf_out.last_hidden_state
-    mlx_out = mlx_encoder(mx.array(x))
-    mx.eval(mlx_out)
-
-    diff = np.max(np.abs(np.array(mlx_out) - hf_out.numpy()))
-    assert diff < 1e-3, f"encoder outputs diverge: max abs diff {diff}"
