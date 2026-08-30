@@ -418,6 +418,27 @@ def test_plus_request_validator_rejects_custom_rich_prompt(task):
         Model.validate_generation_request(plus_model, task=task, prompt="custom")
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("prompt", "summarize <|audio|> now"),
+        ("language", "English <|audio|>"),
+        ("system_prompt", "system <|audio|> text"),
+        ("prefix_text", "prior <|audio|> text"),
+        ("hotwords", "<|audio|>"),
+        ("hotwords", ["Granite", "<|audio|>"]),
+    ],
+)
+def test_request_validator_rejects_reserved_audio_token(field, value):
+    plus_model = SimpleNamespace(
+        is_plus=True,
+        config=SimpleNamespace(model_type="granite_speech_plus"),
+    )
+
+    with pytest.raises(ValueError, match=rf"{field} must not contain"):
+        Model.validate_generation_request(plus_model, **{field: value})
+
+
 @pytest.mark.parametrize("task", ["saa", "timestamps"])
 def test_structured_output_rejects_plain_asr_fallback(task):
     with pytest.raises(StructuredTranscriptError) as exc_info:
@@ -535,6 +556,56 @@ def test_audio_features_match_loaded_encoder_dtype(encoder_dtype):
 
     assert encoder.input_dtype == encoder_dtype
     assert output.dtype == encoder_dtype
+
+
+def _embedding_stub(*, dtype=mx.float16):
+    def embed_tokens(token_ids):
+        batch, sequence = token_ids.shape
+        values = mx.arange(batch * sequence * 3).reshape(batch, sequence, 3)
+        return values.astype(dtype)
+
+    return SimpleNamespace(
+        audio_token_id=99,
+        language_model=SimpleNamespace(
+            model=SimpleNamespace(embed_tokens=embed_tokens)
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("input_ids", "feature_count", "expected_counts"),
+    [
+        ([99, 99, 99], 2, "contains 3.*produced 2"),
+        ([1, 99, 2], 2, "contains 1.*produced 2"),
+    ],
+)
+def test_audio_embedding_injection_rejects_cardinality_mismatch(
+    input_ids, feature_count, expected_counts
+):
+    with pytest.raises(ValueError, match=expected_counts):
+        Model._build_inputs_embeds(
+            _embedding_stub(),
+            mx.array(input_ids),
+            mx.ones((1, feature_count, 3)),
+        )
+
+
+def test_audio_embedding_injection_replaces_every_placeholder_in_order():
+    stub = _embedding_stub(dtype=mx.float16)
+    input_ids = mx.array([1, 99, 99, 2])
+    audio_features = mx.array([[[10.0, 11.0, 12.0], [20.0, 21.0, 22.0]]])
+
+    result = Model._build_inputs_embeds(stub, input_ids, audio_features)
+    expected_text_embeddings = stub.language_model.model.embed_tokens(
+        mx.array([[1, 0, 0, 2]])
+    )
+    mx.eval(result, expected_text_embeddings)
+
+    assert result.dtype == mx.float16
+    np.testing.assert_array_equal(np.array(result[0, 1:3]), np.array(audio_features[0]))
+    np.testing.assert_array_equal(
+        np.array(result[0, [0, 3]]), np.array(expected_text_embeddings[0, [0, 3]])
+    )
 
 
 def test_in_memory_audio_is_resampled_to_model_rate():

@@ -87,6 +87,8 @@ The canonical `saa` and `timestamps` prompts define their output schemas and
 cannot be replaced with `prompt=`. Use `hotwords=` for contextual biasing, or
 use `task="asr"` when supplying a custom instruction. Rich modes fail closed if
 the checkpoint returns plain or malformed text instead of the requested tags.
+The reserved `<|audio|>` token is generated internally; do not include it in a
+prompt, language, system prompt, prefix, or hotword.
 
 ```python
 from mlx_audio.stt import load

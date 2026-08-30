@@ -81,6 +81,14 @@ def _normalize_task(task: str, *, word_timestamps: bool = False) -> str:
     return normalized
 
 
+def _reject_reserved_audio_token(**text_fields: object) -> None:
+    """Reject user-controlled text that could create extra audio placeholders."""
+    for name, value in text_fields.items():
+        values = value if isinstance(value, (list, tuple)) else (value,)
+        if any(isinstance(item, str) and "<|audio|>" in item for item in values):
+            raise ValueError(f"{name} must not contain the reserved <|audio|> token.")
+
+
 def _parse_saa(text: str) -> List[dict]:
     parts = _SPEAKER_RE.split(text)
     segments = []
@@ -682,6 +690,10 @@ class Model(nn.Module):
         *,
         task: str = "asr",
         prompt: Optional[str] = None,
+        language: Optional[str] = None,
+        system_prompt: Optional[str] = None,
+        prefix_text: Optional[str] = None,
+        hotwords: Optional[Union[str, List[str]]] = None,
         word_timestamps: bool = False,
         **_: object,
     ) -> None:
@@ -694,7 +706,14 @@ class Model(nn.Module):
                 f"model_type={self.config.model_type!r}. Load "
                 "ibm-granite/granite-speech-4.1-2b-plus or use task='asr'."
             )
-        _resolve_prompt(normalized_task, prompt, language=None)
+        _resolve_prompt(normalized_task, prompt, language=language)
+        _reject_reserved_audio_token(
+            prompt=prompt,
+            language=language,
+            system_prompt=system_prompt,
+            prefix_text=prefix_text,
+            hotwords=hotwords,
+        )
 
     def model_quant_predicate(self, p: str, m: nn.Module) -> bool:
         return not (p.startswith("encoder") or p.startswith("projector"))
@@ -862,14 +881,31 @@ class Model(nn.Module):
         inputs_embeds = self.language_model.model.embed_tokens(llm_ids[None])
 
         is_audio_np = np.array(is_audio)
-        audio_positions = np.where(is_audio_np)[0]
+        audio_positions = np.flatnonzero(is_audio_np)
 
         orig_dtype = inputs_embeds.dtype
-        embeds_np = np.array(inputs_embeds.astype(mx.float32))
+        embeds_np = np.array(inputs_embeds.astype(mx.float32)).copy()
         audio_np = np.array(audio_features.astype(mx.float32))
 
-        num_audio = min(len(audio_positions), audio_np.shape[1])
-        embeds_np[0, audio_positions[:num_audio]] = audio_np[0, :num_audio]
+        if audio_np.ndim != 3 or audio_np.shape[0] != 1:
+            raise ValueError(
+                "Granite projected audio features must have shape "
+                f"(1, frames, hidden_size), got {audio_np.shape}."
+            )
+
+        placeholder_count = int(audio_positions.size)
+        feature_count = int(audio_np.shape[1])
+        if placeholder_count != feature_count:
+            raise ValueError(
+                "Granite audio placeholder mismatch: the rendered prompt "
+                f"contains {placeholder_count} <|audio|> token(s), but the "
+                f"projector produced {feature_count} audio frame(s). Do not "
+                "include the reserved token in prompt, language, system_prompt, "
+                "prefix_text, or hotwords. Also verify that the tokenizer, chat "
+                "template, and model config come from the same checkpoint revision."
+            )
+
+        embeds_np[0, audio_positions] = audio_np[0]
 
         return mx.array(embeds_np).astype(orig_dtype)
 
@@ -900,7 +936,15 @@ class Model(nn.Module):
         from mlx_audio.stt.utils import merge_hotwords
 
         task = _normalize_task(task, word_timestamps=word_timestamps)
-        Model.validate_generation_request(self, task=task, prompt=prompt)
+        Model.validate_generation_request(
+            self,
+            task=task,
+            prompt=prompt,
+            language=language,
+            system_prompt=system_prompt,
+            prefix_text=prefix_text,
+            hotwords=hotwords,
+        )
         prompt = _resolve_prompt(task, prompt, language)
 
         # Granite biases toward rare vocabulary via an inline "Keywords:" clause.
