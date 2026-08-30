@@ -104,9 +104,7 @@ def test_generate_step_negative_max_tokens_is_unbounded():
         ),
     ],
 )
-def test_streaming_detokenizer_buffers_split_utf8_codepoints(
-    pieces, tokens, expected
-):
+def test_streaming_detokenizer_buffers_split_utf8_codepoints(pieces, tokens, expected):
     class ByteTokenizer:
         clean_up_tokenization_spaces = False
 
