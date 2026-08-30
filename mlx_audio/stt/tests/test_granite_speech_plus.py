@@ -155,6 +155,31 @@ class TestOutputParsers:
         assert segments[0]["end"] == pytest.approx(11.50)
         assert segments[0]["text"] == "hello world again"
 
+    def test_parse_timestamps_accepts_absolute_values_after_rollover(self):
+        segments = _parse_timestamps(
+            "first [T:995] second [T:012] third [T:1234] fourth [T:250]"
+        )
+
+        assert [word["end"] for word in segments[0]["words"]] == pytest.approx(
+            [9.95, 10.12, 12.34, 12.50]
+        )
+        assert segments[0]["text"] == "first second third fourth"
+
+    def test_parse_timestamps_preserves_trailing_untimed_text(self):
+        segments = _parse_timestamps("hello [T:50] trailing words")
+
+        assert segments == [
+            {
+                "text": "hello trailing words",
+                "start": 0.0,
+                "end": 0.5,
+                "words": [{"word": "hello", "start": 0.0, "end": 0.5}],
+            }
+        ]
+        assert _get_cues(SimpleNamespace(segments=segments)) == [
+            {"start": 0.0, "end": 0.5, "text": "hello"}
+        ]
+
     def test_parse_timestamps_untagged_text_yields_nothing(self):
         assert _parse_timestamps("no tags here") == []
 

@@ -51,7 +51,7 @@ TASK_PROMPTS = {
 }
 
 _SPEAKER_RE = re.compile(r"\[Speaker (\d+)\]:")
-_TS_RE = re.compile(r"\[T:(\d{1,3})\]")
+_TS_RE = re.compile(r"\[T:(\d+)\]")
 
 
 def _parse_saa(text: str) -> List[dict]:
@@ -66,40 +66,54 @@ def _parse_saa(text: str) -> List[dict]:
 
 
 def _parse_timestamps(text: str, prefix_text: Optional[str] = None) -> List[dict]:
-    # Tags carry only the last three digits of centiseconds, so they roll over
-    # every 10 s: t = N/100 + 10*R. A tag smaller than its predecessor signals a
-    # rollover. A single tagged span longer than 10 s would alias by one
-    # rollover; that limit is inherent to the tag format.
+    # IBM's model card specifies centiseconds modulo 1000 (a 10 s rollover) and
+    # uses ``\d+`` in its reference parser. Resolve the expected short values in
+    # the current window, while accepting 4+-digit absolute values defensively.
     parts = _TS_RE.split(text)
-    words = []
-    rollover = 0
-    prev = -1
-    cursor = 0.0
-    for n in _TS_RE.findall(prefix_text or ""):
-        n = int(n)
-        if n < prev:
-            rollover += 1
-        prev = n
-        cursor = n / 100 + 10 * rollover
+    tag_values = _TS_RE.findall(text)
+    if not tag_values:
+        return []
 
-    for tok, n in zip(parts[0::2], parts[1::2]):
-        n = int(n)
-        if n < prev:
-            rollover += 1
-        prev = n
-        end = n / 100 + 10 * rollover
+    words = []
+    previous_cs = None
+    cursor = 0.0
+
+    def resolve_centiseconds(value: str) -> int:
+        nonlocal previous_cs
+        centiseconds = int(value)
+        if centiseconds < 1000 and previous_cs is not None:
+            centiseconds += (previous_cs // 1000) * 1000
+            if centiseconds < previous_cs:
+                centiseconds += 1000
+        previous_cs = centiseconds
+        return centiseconds
+
+    for n in _TS_RE.findall(prefix_text or ""):
+        cursor = resolve_centiseconds(n) / 100
+
+    for tok, n in zip(parts[0::2], tag_values):
+        end = resolve_centiseconds(n) / 100
         tok = tok.strip()
         # "_" is a tagged silence: advance the cursor without emitting a word.
         if tok and tok != "_":
             words.append({"word": tok, "start": cursor, "end": end})
         cursor = end
-    if not words:
+
+    # A generation cut off before its final timestamp still contains useful
+    # transcript text, but there is no reliable end time to put in `words`.
+    trailing_text = parts[-1].strip()
+    if trailing_text == "_":
+        trailing_text = ""
+    transcript_parts = [word["word"] for word in words]
+    if trailing_text:
+        transcript_parts.append(trailing_text)
+    if not transcript_parts:
         return []
     return [
         {
-            "text": " ".join(w["word"] for w in words),
-            "start": words[0]["start"],
-            "end": words[-1]["end"],
+            "text": " ".join(transcript_parts),
+            "start": words[0]["start"] if words else cursor,
+            "end": words[-1]["end"] if words else cursor,
             "words": words,
         }
     ]
