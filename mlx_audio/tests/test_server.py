@@ -224,6 +224,42 @@ def test_stt_transcriptions_bad_model_returns_404(client, mock_model_provider):
     assert "does-not-exist-on-hf" in body["detail"]
 
 
+@pytest.mark.parametrize("response_format", ["ndjson", "verbose_json"])
+def test_stt_request_validation_returns_422_before_generation(
+    client, mock_model_provider, response_format
+):
+    class RejectingModel:
+        def __init__(self):
+            self.generate_called = False
+
+        def validate_generation_request(self, *, task="asr", **kwargs):
+            del kwargs
+            if task != "asr":
+                raise ValueError("timestamps require a Plus checkpoint")
+
+        def generate(self, path, *, task=None):
+            del path, task
+            self.generate_called = True
+            return {"text": "should not run"}
+
+    model = RejectingModel()
+    mock_model_provider.load_model = MagicMock(return_value=model)
+
+    response = client.post(
+        "/v1/audio/transcriptions",
+        files={"file": ("test.mp3", _make_transcription_audio_buffer(), "audio/mp3")},
+        data={
+            "model": "base-granite",
+            "task": "timestamps",
+            "response_format": response_format,
+        },
+    )
+
+    assert response.status_code == 422
+    assert "require a Plus" in response.json()["detail"]
+    assert not model.generate_called
+
+
 def test_stt_transcriptions(client, mock_model_provider):
     # Test that the stt_transcriptions endpoint returns a 200 status code
     mock_stt_model = MagicMock()
@@ -600,6 +636,26 @@ def _ws_send_audio_and_collect(
                 break
 
     return messages, mock_stt_model
+
+
+def test_realtime_ws_rejects_invalid_request_before_ready(client, mock_model_provider):
+    class RejectingModel:
+        def validate_generation_request(self, *, task="asr", **kwargs):
+            del kwargs
+            if task != "asr":
+                raise ValueError("timestamps require a Plus checkpoint")
+
+        def generate(self, audio, **kwargs):
+            raise AssertionError("generation must not start")
+
+    mock_model_provider.load_model = MagicMock(return_value=RejectingModel())
+
+    with client.websocket_connect("/v1/audio/transcriptions/realtime") as ws:
+        ws.send_json({"model": "base-granite", "task": "timestamps"})
+        message = ws.receive_json()
+
+    assert message["status"] == "error"
+    assert "require a Plus" in message["error"]
 
 
 def test_realtime_ws_streaming_model_sends_deltas(client, mock_model_provider):

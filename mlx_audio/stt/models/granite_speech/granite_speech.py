@@ -54,6 +54,25 @@ _SPEAKER_RE = re.compile(r"\[Speaker (\d+)\]:")
 _TS_RE = re.compile(r"\[T:(\d+)\]")
 
 
+class UnsupportedTranscriptionTask(ValueError):
+    """The loaded checkpoint cannot perform the requested transcription task."""
+
+
+def _normalize_task(task: str, *, word_timestamps: bool = False) -> str:
+    normalized = (task or "asr").lower().strip()
+    if normalized not in TASK_PROMPTS:
+        raise ValueError(
+            f"Unknown task {task!r}; expected one of {sorted(TASK_PROMPTS)}"
+        )
+    if word_timestamps:
+        if normalized not in ("asr", "timestamps"):
+            raise ValueError(
+                "word_timestamps=True conflicts with " f"task={normalized!r}"
+            )
+        normalized = "timestamps"
+    return normalized
+
+
 def _parse_saa(text: str) -> List[dict]:
     parts = _SPEAKER_RE.split(text)
     segments = []
@@ -123,10 +142,7 @@ def _resolve_prompt(task: str, prompt: Optional[str], language: Optional[str]) -
     # Priority: explicit prompt > rich-transcription task > translation via
     # language > default ASR. A rich-transcription task must not be overridden
     # when a caller also supplies a translation language.
-    if task not in TASK_PROMPTS:
-        raise ValueError(
-            f"Unknown task {task!r}; expected one of {sorted(TASK_PROMPTS)}"
-        )
+    task = _normalize_task(task)
     if prompt is not None:
         return prompt
     if task != "asr":
@@ -623,6 +639,25 @@ class Model(nn.Module):
         projected = self.projector(encoder_output)
         return projected
 
+    def validate_generation_request(
+        self,
+        *,
+        task: str = "asr",
+        prompt: Optional[str] = None,
+        word_timestamps: bool = False,
+        **_: object,
+    ) -> None:
+        """Validate cheap checkpoint capability constraints before generation."""
+        del prompt
+        normalized_task = _normalize_task(task, word_timestamps=word_timestamps)
+        if normalized_task != "asr" and not self.is_plus:
+            raise UnsupportedTranscriptionTask(
+                f"task={normalized_task!r} requires a Granite Speech Plus "
+                f"checkpoint, but the loaded model has "
+                f"model_type={self.config.model_type!r}. Load "
+                "ibm-granite/granite-speech-4.1-2b-plus or use task='asr'."
+            )
+
     def model_quant_predicate(self, p: str, m: nn.Module) -> bool:
         return not (p.startswith("encoder") or p.startswith("projector"))
 
@@ -826,20 +861,9 @@ class Model(nn.Module):
     ) -> Union[STTOutput, Generator[StreamingResult, None, None]]:
         from mlx_audio.stt.utils import merge_hotwords
 
-        if word_timestamps:
-            if task not in ("asr", "timestamps"):
-                raise ValueError(
-                    "word_timestamps=True conflicts with " f"task={task!r}"
-                )
-            task = "timestamps"
-
+        task = _normalize_task(task, word_timestamps=word_timestamps)
+        Model.validate_generation_request(self, task=task, prompt=prompt)
         prompt = _resolve_prompt(task, prompt, language)
-        if task != "asr" and not self.is_plus:
-            print(
-                f"[WARNING] task={task!r} needs a granite_speech_plus checkpoint; "
-                f"{self.config.model_type} will silently fall back to plain "
-                "transcription."
-            )
 
         # Granite biases toward rare vocabulary via an inline "Keywords:" clause.
         keywords = merge_hotwords(None, hotwords)

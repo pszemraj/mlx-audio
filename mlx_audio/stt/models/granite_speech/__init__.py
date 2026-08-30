@@ -1,5 +1,5 @@
 from .config import EncoderConfig, ModelConfig, ProjectorConfig, TextConfig
-from .granite_speech import Model
+from .granite_speech import Model, UnsupportedTranscriptionTask
 
 DETECTION_HINTS = {
     "config_keys": {"encoder_config", "projector_config", "audio_token_index"},
@@ -15,5 +15,6 @@ __all__ = [
     "TextConfig",
     "ModelConfig",
     "Model",
+    "UnsupportedTranscriptionTask",
     "DETECTION_HINTS",
 ]

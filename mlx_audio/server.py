@@ -309,6 +309,37 @@ def _prepare_stt_generate_kwargs(stt_model, gen_kwargs: Dict[str, Any]) -> dict:
     }
 
 
+def _validate_stt_generation_request(stt_model, gen_kwargs: Dict[str, Any]) -> None:
+    """Run a backend's cheap request validator when it exposes one."""
+    validator = getattr(stt_model, "validate_generation_request", None)
+    if not callable(validator):
+        return
+
+    params = inspect.signature(validator).parameters
+    accepts_var_kwargs = any(
+        param.kind is inspect.Parameter.VAR_KEYWORD for param in params.values()
+    )
+    validator(
+        **{
+            key: value
+            for key, value in gen_kwargs.items()
+            if value is not None and (key in params or accepts_var_kwargs)
+        }
+    )
+
+
+async def _preflight_stt_generation_request(payload: TranscriptionRequest) -> None:
+    """Validate an STT request before a streaming response commits HTTP 200."""
+    await _preflight_model_load(payload.model)
+    stt_model = model_provider.load_model(payload.model)
+    gen_kwargs = payload.model_dump(exclude={"model"}, exclude_none=True)
+    gen_kwargs = _prepare_stt_generate_kwargs(stt_model, gen_kwargs)
+    try:
+        _validate_stt_generation_request(stt_model, gen_kwargs)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 class STTExecutionAdapter(BaseModelExecutionAdapter):
     def run_serial(self, request: InferenceRequest) -> None:
         payload: TranscriptionTaskPayload = request.payload
@@ -323,6 +354,7 @@ class STTExecutionAdapter(BaseModelExecutionAdapter):
                 exclude={"model"}, exclude_none=True
             )
             gen_kwargs = _prepare_stt_generate_kwargs(stt_model, gen_kwargs)
+            _validate_stt_generation_request(stt_model, gen_kwargs)
 
             result = stt_model.generate(tmp_path, **gen_kwargs)
             if hasattr(result, "__iter__") and hasattr(result, "__next__"):
@@ -1113,7 +1145,7 @@ async def stt_transcriptions(
     audio, sr = audio_read(tmp, always_2d=False)
     tmp.close()
 
-    await _preflight_model_load(payload.model)
+    await _preflight_stt_generation_request(payload)
 
     handle = get_inference_broker().submit(
         endpoint_kind="stt",
@@ -1354,6 +1386,7 @@ async def stt_realtime_transcriptions(websocket: WebSocket):
         # Load the STT model
         print("Loading STT model...")
         stt_model = model_provider.load_model(model_name)
+        _validate_stt_generation_request(stt_model, generation_options)
         print("STT model loaded successfully")
 
         # Initialize WebRTC VAD for speech detection

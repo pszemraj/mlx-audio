@@ -28,6 +28,7 @@ from mlx_audio.stt.models.granite_speech.granite_speech import (
     EncoderProjector,
     Model,
     StreamingResult,
+    UnsupportedTranscriptionTask,
     _parse_saa,
     _parse_segments,
     _parse_timestamps,
@@ -350,6 +351,28 @@ class TestBuildPrompt:
 def test_generate_rejects_unknown_task():
     with pytest.raises(ValueError, match="Unknown task"):
         Model.generate(SimpleNamespace(), None, task="diarize")
+
+
+@pytest.mark.parametrize("task", ["saa", "timestamps"])
+@pytest.mark.parametrize("stream", [False, True])
+def test_base_checkpoint_rejects_rich_tasks_before_generation(task, stream):
+    base_model = SimpleNamespace(
+        is_plus=False,
+        config=SimpleNamespace(model_type="granite_speech"),
+    )
+
+    with pytest.raises(UnsupportedTranscriptionTask, match="requires.*Plus"):
+        Model.generate(base_model, mx.zeros((1,)), task=task, stream=stream)
+
+
+def test_base_checkpoint_rejects_word_timestamp_alias_before_generation():
+    base_model = SimpleNamespace(
+        is_plus=False,
+        config=SimpleNamespace(model_type="granite_speech"),
+    )
+
+    with pytest.raises(UnsupportedTranscriptionTask, match="requires.*Plus"):
+        Model.generate(base_model, mx.zeros((1,)), word_timestamps=True)
 
 
 class TestResolvePrompt:
