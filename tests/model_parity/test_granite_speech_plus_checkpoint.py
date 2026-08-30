@@ -14,6 +14,7 @@ from pathlib import Path
 import mlx.core as mx
 import numpy as np
 import pytest
+import tokenizers
 import torch
 import torchaudio
 import transformers
@@ -29,12 +30,11 @@ from mlx_audio.stt.utils import load_model
 MODEL_ID = "ibm-granite/granite-speech-4.1-2b-plus"
 MODEL_REVISION = "1454e6e1e33845ca9280ff65f52cf1141ba6e6e2"
 TOKENIZER_REVISION = MODEL_REVISION
+REFERENCE_TRANSFORMERS = "5.8.1"
+REFERENCE_TOKENIZERS = "0.23.0-rc0"
 FIXTURE = Path(__file__).parents[2] / "examples/voice_prompts/en_man.wav"
-# Transformers 5.16.1 does not expand the projector query batch for multiple
-# 15-frame windows. Keep the cross-framework logits comparison to one window;
-# the MLX rich-mode checks below still exercise a multi-window speech slice.
-REFERENCE_SAMPLES = 3_200
 RICH_FIXTURE_SECONDS = 4
+REFERENCE_SAMPLES = RICH_FIXTURE_SECONDS * 16_000
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("MLX_AUDIO_RUN_GRANITE_CHECKPOINT_PARITY") != "1",
@@ -58,6 +58,7 @@ def _log_provenance():
         "model_revision": MODEL_REVISION,
         "tokenizer_revision": TOKENIZER_REVISION,
         "transformers": transformers.__version__,
+        "tokenizers": tokenizers.__version__,
         "torch": torch.__version__,
         "torchaudio": torchaudio.__version__,
         "mlx": importlib.metadata.version("mlx"),
@@ -76,6 +77,18 @@ def _log_provenance():
 
 
 def test_pinned_checkpoint_reference_and_mlx_paths():
+    if transformers.__version__ != REFERENCE_TRANSFORMERS:
+        raise RuntimeError(
+            "The multi-window checkpoint reference requires "
+            f"transformers=={REFERENCE_TRANSFORMERS}, got "
+            f"{transformers.__version__}. Use the isolated reference target "
+            "documented in tests/model_parity/README.md."
+        )
+    if tokenizers.__version__ != REFERENCE_TOKENIZERS:
+        raise RuntimeError(
+            "The pinned reference requires "
+            f"tokenizers=={REFERENCE_TOKENIZERS}, got {tokenizers.__version__}."
+        )
     if not torch.backends.mps.is_available():
         raise RuntimeError("The pinned reference smoke requires a real MPS device.")
     if not mx.metal.is_available():
@@ -139,12 +152,11 @@ def test_pinned_checkpoint_reference_and_mlx_paths():
         :, -1
     ]
     mx.eval(mlx_logits)
-    raw_mlx_logits = np.asarray(mlx_logits.astype(mx.float32))
-    raw_mlx_logits *= model.config.text_config.logits_scaling
-    absolute_error = np.abs(raw_mlx_logits - reference_logits)
+    mlx_logits_np = np.asarray(mlx_logits.astype(mx.float32))
+    absolute_error = np.abs(mlx_logits_np - reference_logits)
     cosine = float(
-        np.sum(raw_mlx_logits * reference_logits)
-        / (np.linalg.norm(raw_mlx_logits) * np.linalg.norm(reference_logits))
+        np.sum(mlx_logits_np * reference_logits)
+        / (np.linalg.norm(mlx_logits_np) * np.linalg.norm(reference_logits))
     )
     print(
         "First-token logits: "
@@ -153,13 +165,13 @@ def test_pinned_checkpoint_reference_and_mlx_paths():
         f"p99_abs={np.percentile(absolute_error, 99):.6f}, "
         f"cosine={cosine:.8f}"
     )
-    # BF16 kernels quantize large-magnitude logits in visibly different steps
-    # across MPS and Metal, so gate aggregate and worst-case error separately.
-    assert float(absolute_error.max()) <= 2.0
-    assert float(absolute_error.mean()) <= 0.3
-    assert float(np.percentile(absolute_error, 99)) <= 1.0
+    # BF16 kernels quantize logits in different steps across MPS and Metal, so
+    # gate aggregate and worst-case error separately.
+    assert float(absolute_error.max()) <= 0.25
+    assert float(absolute_error.mean()) <= 0.05
+    assert float(np.percentile(absolute_error, 99)) <= 0.1
     assert cosine >= 0.9999
-    assert int(np.argmax(raw_mlx_logits, axis=-1)[0]) == reference_token
+    assert int(np.argmax(mlx_logits_np, axis=-1)[0]) == reference_token
 
     saa = model.generate(
         rich_audio,
