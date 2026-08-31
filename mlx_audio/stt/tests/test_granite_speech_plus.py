@@ -137,13 +137,29 @@ class TestOutputParsers:
         assert segments[2]["text"] == "I feel wonderful"
         assert all("start" not in s for s in segments)
 
-    def test_parse_saa_untagged_text_yields_nothing(self):
-        assert _parse_saa("plain transcription without tags") == []
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "plain transcription without tags",
+            "intro without attribution [Speaker 1]: tagged turn",
+            "[Speaker 2]: hello",
+            "[Speaker 1]: hello [Speaker 3]: world",
+            "[Speaker 1]:",
+        ],
+    )
+    def test_parse_saa_rejects_invalid_speaker_structure(self, text):
+        with pytest.raises(StructuredTranscriptError) as exc_info:
+            _parse_saa(text)
 
-    def test_parse_saa_preserves_leading_untagged_text(self):
-        assert _parse_saa("intro without attribution [Speaker 1]: tagged turn") == [
-            {"speaker_id": None, "text": "intro without attribution"},
-            {"speaker_id": 1, "text": "tagged turn"},
+        assert exc_info.value.raw_text == text
+
+    def test_parse_saa_allows_ordered_speaker_reentry(self):
+        assert _parse_saa(
+            "[Speaker 1]: hello " "[Speaker 2]: hi " "[Speaker 1]: welcome back"
+        ) == [
+            {"speaker_id": 1, "text": "hello"},
+            {"speaker_id": 2, "text": "hi"},
+            {"speaker_id": 1, "text": "welcome back"},
         ]
 
     def test_parse_timestamps_rollover_and_silence(self):
@@ -170,23 +186,24 @@ class TestOutputParsers:
         )
         assert segments[0]["text"] == "first second third fourth"
 
-    def test_parse_timestamps_does_not_assign_time_to_trailing_text(self):
-        segments = _parse_timestamps("hello [T:50] trailing words")
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "no tags here",
+            "hello world [T:100]",
+            "hello [T:50] [T:100]",
+            "hello [T:50] _",
+        ],
+    )
+    def test_parse_timestamps_rejects_incomplete_word_alignment(self, text):
+        with pytest.raises(StructuredTranscriptError) as exc_info:
+            _parse_timestamps(text)
 
-        assert segments == [
-            {
-                "text": "hello",
-                "start": 0.0,
-                "end": 0.5,
-                "words": [{"word": "hello", "start": 0.0, "end": 0.5}],
-            }
-        ]
-        assert _get_cues(SimpleNamespace(segments=segments)) == [
-            {"start": 0.0, "end": 0.5, "text": "hello"}
-        ]
+        assert exc_info.value.raw_text == text
 
-    def test_parse_timestamps_untagged_text_yields_nothing(self):
-        assert _parse_timestamps("no tags here") == []
+    def test_parse_timestamps_rejects_backwards_absolute_value(self):
+        with pytest.raises(StructuredTranscriptError, match="moved backwards"):
+            _parse_timestamps("first [T:1234] second [T:1200]")
 
     def test_timestamp_continuation_inherits_prefix_clock(self):
         segments = _parse_segments(
@@ -241,14 +258,25 @@ class TestOutputParsers:
             }
         ]
 
-    def test_tagged_saa_continuation_ignores_prefix(self):
+    def test_tagged_saa_continuation_extends_prefix_numbering(self):
         segments = _parse_segments(
-            "saa", "[Speaker 3]: new voice", prefix_text="[Speaker 1]: hello"
+            "saa", "[Speaker 2]: new voice", prefix_text="[Speaker 1]: hello"
         )
-        assert segments == [{"speaker_id": 3, "text": "new voice"}]
+        assert segments == [{"speaker_id": 2, "text": "new voice"}]
 
-    def test_saa_continuation_without_prefix_tags_unchanged(self):
-        assert _parse_segments("saa", "plain text", prefix_text="no tags here") == []
+    def test_saa_continuation_rejects_malformed_prefix(self):
+        with pytest.raises(StructuredTranscriptError) as exc_info:
+            _parse_segments("saa", "plain text", prefix_text="no tags here")
+
+        assert exc_info.value.raw_text == "no tags here"
+
+    def test_timestamp_continuation_rejects_malformed_prefix(self):
+        with pytest.raises(StructuredTranscriptError) as exc_info:
+            _parse_segments(
+                "timestamps", "continued [T:50]", prefix_text="no tags here"
+            )
+
+        assert exc_info.value.raw_text == "no tags here"
 
     @pytest.mark.parametrize("output_format", ["srt", "vtt"])
     def test_untimed_saa_subtitles_fall_back_to_text(
@@ -453,12 +481,12 @@ def test_saa_output_allows_tagless_continuation_with_tagged_prefix():
     _validate_structured_output(
         "saa",
         "continued turn",
-        prefix_text="[Speaker 2]: earlier turn",
+        prefix_text="[Speaker 1]: earlier turn",
     )
 
 
 def test_timestamp_output_rejects_untimed_trailing_text():
-    with pytest.raises(StructuredTranscriptError, match="untimestamped"):
+    with pytest.raises(StructuredTranscriptError, match=r"lacking a \[T:N\] tag"):
         _validate_structured_output("timestamps", "hello [T:50] trailing words")
 
 

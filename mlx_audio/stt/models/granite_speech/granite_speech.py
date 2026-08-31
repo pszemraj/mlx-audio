@@ -102,59 +102,202 @@ def _reject_reserved_audio_token(**text_fields: object) -> None:
             raise ValueError(f"{name} must not contain the reserved <|audio|> token.")
 
 
-def _parse_saa(text: str) -> List[dict]:
-    parts = _SPEAKER_RE.split(text)
-    segments = []
-    if len(parts) > 1 and parts[0].strip():
-        segments.append({"speaker_id": None, "text": parts[0].strip()})
-    for spk, body in zip(parts[1::2], parts[2::2]):
-        if body.strip():
-            segments.append({"speaker_id": int(spk), "text": body.strip()})
+def _speaker_state_from_prefix(
+    prefix_text: Optional[str],
+) -> Tuple[List[int], Optional[int]]:
+    """Validate an SAA prefix and return seen speakers plus the active speaker."""
+    if not prefix_text:
+        return [], None
+
+    matches = list(_SPEAKER_RE.finditer(prefix_text))
+    if not matches:
+        raise StructuredTranscriptError(
+            "SAA prefix_text contains no [Speaker N]: tags.",
+            raw_text=prefix_text,
+        )
+    if prefix_text[: matches[0].start()].strip():
+        raise StructuredTranscriptError(
+            "SAA prefix_text begins with unattributed text.",
+            raw_text=prefix_text,
+        )
+
+    seen: List[int] = []
+    for index, match in enumerate(matches):
+        speaker_id = int(match.group(1))
+        body_end = (
+            matches[index + 1].start() if index + 1 < len(matches) else len(prefix_text)
+        )
+        if not prefix_text[match.end() : body_end].strip():
+            raise StructuredTranscriptError(
+                f"[Speaker {speaker_id}]: has no associated transcript text.",
+                raw_text=prefix_text,
+            )
+        if speaker_id not in seen:
+            expected = len(seen) + 1
+            if speaker_id != expected:
+                raise StructuredTranscriptError(
+                    "SAA speakers must be introduced in order: "
+                    f"expected Speaker {expected}, got Speaker {speaker_id}.",
+                    raw_text=prefix_text,
+                )
+            seen.append(speaker_id)
+
+    return seen, int(matches[-1].group(1))
+
+
+def _parse_saa(text: str, prefix_text: Optional[str] = None) -> List[dict]:
+    """Parse a complete SAA continuation without inventing speaker metadata."""
+    seen, active_prefix_speaker = _speaker_state_from_prefix(prefix_text)
+    matches = list(_SPEAKER_RE.finditer(text))
+    segments: List[dict] = []
+    leading = text[: matches[0].start()].strip() if matches else text.strip()
+
+    if leading:
+        if active_prefix_speaker is None:
+            raise StructuredTranscriptError(
+                "Granite SAA output begins with unattributed text before the "
+                "first [Speaker N]: tag.",
+                raw_text=text,
+            )
+        segments.append(
+            {
+                "speaker_id": active_prefix_speaker,
+                "speaker_id_source": "inferred_from_prefix",
+                "text": leading,
+            }
+        )
+
+    if not matches:
+        if segments:
+            return segments
+        raise StructuredTranscriptError(
+            "Granite speaker-attribution mode produced no [Speaker N]: tags "
+            "and no attributable continuation.",
+            raw_text=text,
+        )
+
+    for index, match in enumerate(matches):
+        speaker_id = int(match.group(1))
+        body_end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        body = text[match.end() : body_end].strip()
+        if not body:
+            raise StructuredTranscriptError(
+                f"[Speaker {speaker_id}]: has no associated transcript text.",
+                raw_text=text,
+            )
+        if speaker_id not in seen:
+            expected = len(seen) + 1
+            if speaker_id != expected:
+                raise StructuredTranscriptError(
+                    "SAA speakers must be introduced in order: "
+                    f"expected Speaker {expected}, got Speaker {speaker_id}.",
+                    raw_text=text,
+                )
+            seen.append(speaker_id)
+        segments.append({"speaker_id": speaker_id, "text": body})
+
     return segments
 
 
-def _parse_timestamps(text: str, prefix_text: Optional[str] = None) -> List[dict]:
-    # IBM's model card specifies centiseconds modulo 1000 (a 10 s rollover) and
-    # uses ``\d+`` in its reference parser. Resolve the expected short values in
-    # the current window, while accepting 4+-digit absolute values defensively.
+def _resolve_timestamp_centiseconds(value: str, previous_cs: Optional[int]) -> int:
+    """Resolve a modulo-1000 timestamp while enforcing monotonic output."""
+    current_cs = int(value)
+    if current_cs >= 1000:
+        if previous_cs is not None and current_cs < previous_cs:
+            raise ValueError(
+                "Absolute Granite timestamp moved backwards: "
+                f"{current_cs} < {previous_cs} centiseconds."
+            )
+        return current_cs
+    if previous_cs is None:
+        return current_cs
+
+    current_cs += (previous_cs // 1000) * 1000
+    while current_cs < previous_cs:
+        current_cs += 1000
+    return current_cs
+
+
+def _timestamp_items(text: str, *, source: str) -> List[Tuple[str, str]]:
+    """Return validated ``(word, timestamp)`` pairs for one transcript string."""
+    tags = _TS_RE.findall(text)
+    if not tags:
+        message = (
+            "Timestamp prefix_text contains no [T:N] tags."
+            if source == "prefix_text"
+            else "Granite timestamp mode produced no [T:N] tags. The model may "
+            "have fallen back to plain ASR."
+        )
+        raise StructuredTranscriptError(message, raw_text=text)
+
     parts = _TS_RE.split(text)
-    tag_values = _TS_RE.findall(text)
-    if not tag_values:
-        return []
+    trailing = parts[-1].strip()
+    if trailing:
+        message = (
+            "Timestamp prefix_text ends with content lacking a [T:N] tag: "
+            if source == "prefix_text"
+            else "Granite timestamp output ends with content lacking a [T:N] tag: "
+        )
+        raise StructuredTranscriptError(f"{message}{trailing!r}.", raw_text=text)
 
+    items: List[Tuple[str, str]] = []
+    for raw_token, raw_timestamp in zip(parts[0::2], tags):
+        token = raw_token.strip()
+        if not token:
+            raise StructuredTranscriptError(
+                f"[T:{raw_timestamp}] has no preceding word or '_' marker.",
+                raw_text=text,
+            )
+        if token != "_" and len(token.split()) != 1:
+            raise StructuredTranscriptError(
+                "Expected exactly one word or '_' before each timestamp tag, "
+                f"but {token!r} precedes [T:{raw_timestamp}]. One or more "
+                "timestamp tags are missing.",
+                raw_text=text,
+            )
+        items.append((token, raw_timestamp))
+    return items
+
+
+def _timestamp_cursor_from_prefix(
+    prefix_text: Optional[str],
+) -> Tuple[float, Optional[int]]:
+    """Validate a timestamp prefix and recover its absolute time cursor."""
+    if not prefix_text:
+        return 0.0, None
+
+    previous_cs: Optional[int] = None
+    for _, raw_timestamp in _timestamp_items(prefix_text, source="prefix_text"):
+        try:
+            previous_cs = _resolve_timestamp_centiseconds(raw_timestamp, previous_cs)
+        except ValueError as exc:
+            raise StructuredTranscriptError(str(exc), raw_text=prefix_text) from exc
+    return previous_cs / 100.0, previous_cs
+
+
+def _parse_timestamps(text: str, prefix_text: Optional[str] = None) -> List[dict]:
+    """Parse a complete word-timestamp sequence without fabricating alignment."""
+    cursor, previous_cs = _timestamp_cursor_from_prefix(prefix_text)
     words = []
-    previous_cs = None
-    cursor = 0.0
 
-    def resolve_centiseconds(value: str) -> int:
-        nonlocal previous_cs
-        centiseconds = int(value)
-        if centiseconds < 1000 and previous_cs is not None:
-            centiseconds += (previous_cs // 1000) * 1000
-            if centiseconds < previous_cs:
-                centiseconds += 1000
-        previous_cs = centiseconds
-        return centiseconds
-
-    for n in _TS_RE.findall(prefix_text or ""):
-        cursor = resolve_centiseconds(n) / 100
-
-    for tok, n in zip(parts[0::2], tag_values):
-        end = resolve_centiseconds(n) / 100
-        tok = tok.strip()
-        # "_" is a tagged silence: advance the cursor without emitting a word.
-        if tok and tok != "_":
-            words.append({"word": tok, "start": cursor, "end": end})
+    for token, raw_timestamp in _timestamp_items(text, source="output"):
+        try:
+            current_cs = _resolve_timestamp_centiseconds(raw_timestamp, previous_cs)
+        except ValueError as exc:
+            raise StructuredTranscriptError(str(exc), raw_text=text) from exc
+        end = current_cs / 100.0
+        if token != "_":
+            words.append({"word": token, "start": cursor, "end": end})
         cursor = end
+        previous_cs = current_cs
 
-    transcript_parts = [word["word"] for word in words]
-    if not transcript_parts:
+    if not words:
         return []
     return [
         {
-            "text": " ".join(transcript_parts),
-            "start": words[0]["start"] if words else cursor,
-            "end": words[-1]["end"] if words else cursor,
+            "text": " ".join(word["word"] for word in words),
+            "start": words[0]["start"],
+            "end": words[-1]["end"],
             "words": words,
         }
     ]
@@ -183,46 +326,15 @@ def _resolve_prompt(task: str, prompt: Optional[str], language: Optional[str]) -
 def _validate_structured_output(
     task: str, text: str, prefix_text: Optional[str] = None
 ) -> None:
-    """Reject rich-mode fallback or malformed text before schema parsing."""
-    if task == "timestamps":
-        if not _TS_RE.search(text):
-            raise StructuredTranscriptError(
-                "Granite timestamp mode produced no [T:N] tags. The model may "
-                "have fallen back to plain ASR.",
-                raw_text=text,
-            )
-        trailing = _TS_RE.split(text)[-1].strip()
-        if trailing and trailing != "_":
-            raise StructuredTranscriptError(
-                "Granite timestamp mode ended with untimestamped text. The "
-                "structured transcript is malformed.",
-                raw_text=text,
-            )
-    elif task == "saa":
-        has_generated_tag = bool(_SPEAKER_RE.search(text))
-        has_prefix_tag = bool(_SPEAKER_RE.search(prefix_text or ""))
-        if not has_generated_tag and not (has_prefix_tag and text.strip()):
-            raise StructuredTranscriptError(
-                "Granite speaker-attribution mode produced no [Speaker N]: "
-                "tags and no attributable continuation.",
-                raw_text=text,
-            )
+    """Validate rich output through the same strict parser used for results."""
+    _parse_segments(task, text, prefix_text)
 
 
 def _parse_segments(
     task: str, text: str, prefix_text: Optional[str] = None
 ) -> List[dict]:
     if task == "saa":
-        if prefix_text and not _SPEAKER_RE.match(text.lstrip()):
-            # A continuation that starts mid-turn carries no tag of its own;
-            # it belongs to the last speaker in the prefix.
-            tags = _SPEAKER_RE.findall(prefix_text)
-            if tags:
-                segments = _parse_saa(f"[Speaker {tags[-1]}]: {text}")
-                if segments:
-                    segments[0]["speaker_id_source"] = "inferred_from_prefix"
-                return segments
-        return _parse_saa(text)
+        return _parse_saa(text, prefix_text)
     if task == "timestamps":
         return _parse_timestamps(text, prefix_text)
     return []
@@ -1047,8 +1159,7 @@ class Model(nn.Module):
                 max_tokens=max_tokens,
                 partial_text=text,
             )
-        if task != "asr":
-            _validate_structured_output(task, text, prefix_text)
+        segments = _parse_segments(task, text, prefix_text)
         elapsed = time.time() - start_time
         gen_tokens = len(tokens)
 
@@ -1061,7 +1172,7 @@ class Model(nn.Module):
 
         return STTOutput(
             text=text,
-            segments=_parse_segments(task, text, prefix_text),
+            segments=segments,
             prompt_tokens=prompt_tokens,
             generation_tokens=gen_tokens,
             total_tokens=prompt_tokens + gen_tokens,
@@ -1164,7 +1275,6 @@ class Model(nn.Module):
             error = str(incomplete)
         elif task != "asr":
             try:
-                _validate_structured_output(task, full_text, prefix_text)
                 segments = _parse_segments(task, full_text, prefix_text)
             except StructuredTranscriptError as exc:
                 complete = False
