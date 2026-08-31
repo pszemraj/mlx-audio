@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 
+import accelerate
 import mlx.core as mx
 import numpy as np
 import pytest
@@ -32,6 +33,7 @@ MODEL_REVISION = "1454e6e1e33845ca9280ff65f52cf1141ba6e6e2"
 TOKENIZER_REVISION = MODEL_REVISION
 REFERENCE_TRANSFORMERS = "5.8.1"
 REFERENCE_TOKENIZERS = "0.23.0-rc0"
+REFERENCE_ACCELERATE = "1.14.0"
 FIXTURE = Path(__file__).parents[2] / "examples/voice_prompts/en_man.wav"
 RICH_FIXTURE_SECONDS = 4
 REFERENCE_SAMPLES = RICH_FIXTURE_SECONDS * 16_000
@@ -59,6 +61,7 @@ def _log_provenance():
         "tokenizer_revision": TOKENIZER_REVISION,
         "transformers": transformers.__version__,
         "tokenizers": tokenizers.__version__,
+        "accelerate": accelerate.__version__,
         "torch": torch.__version__,
         "torchaudio": torchaudio.__version__,
         "mlx": importlib.metadata.version("mlx"),
@@ -70,6 +73,7 @@ def _log_provenance():
             "dtype": "bfloat16",
             "quantize": False,
             "strict_load": True,
+            "reference_device_map": "mps",
         },
     }
     print("Granite Speech Plus checkpoint parity provenance:")
@@ -88,6 +92,11 @@ def test_pinned_checkpoint_reference_and_mlx_paths():
         raise RuntimeError(
             "The pinned reference requires "
             f"tokenizers=={REFERENCE_TOKENIZERS}, got {tokenizers.__version__}."
+        )
+    if accelerate.__version__ != REFERENCE_ACCELERATE:
+        raise RuntimeError(
+            "The direct-to-MPS reference load requires "
+            f"accelerate=={REFERENCE_ACCELERATE}, got {accelerate.__version__}."
         )
     if not torch.backends.mps.is_available():
         raise RuntimeError("The pinned reference smoke requires a real MPS device.")
@@ -118,7 +127,11 @@ def test_pinned_checkpoint_reference_and_mlx_paths():
         MODEL_ID,
         revision=MODEL_REVISION,
         dtype=torch.bfloat16,
-    ).to(device)
+        # A single-device map materializes checkpoint tensors directly on MPS.
+        # Avoiding a simultaneous full CPU model copy keeps this manual gate
+        # viable on memory-constrained GitHub-hosted Apple Silicon runners.
+        device_map="mps",
+    )
     reference.eval()
     asr_inputs = reference_inputs["asr"].to(device)
     with torch.inference_mode():

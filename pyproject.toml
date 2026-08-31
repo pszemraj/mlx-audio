@@ -91,6 +91,7 @@ parity = [
 # Mandatory reference stack for Granite Speech Plus numerical parity. Keep
 # these exact so CI failures represent model drift rather than dependency drift.
 granite-parity = [
+    "accelerate==1.14.0",
     "torch==2.13.0",
     "torchaudio==2.11.0",
     "transformers==5.16.1",

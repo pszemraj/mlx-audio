@@ -19,7 +19,9 @@ revision
 `1454e6e1e33845ca9280ff65f52cf1141ba6e6e2`, loads MLX weights with
 `strict=True`, compares reference/MLX first-token logits and greedy choice,
 renders all three task prompts, and requires speaker and timestamp markers from
-the tracked audio fixture.
+the tracked audio fixture. The parity extra also pins Accelerate 1.14.0 so the
+reference weights materialize directly on MPS instead of retaining a complete
+second CPU model copy during loading.
 
 ```bash
 reference_dir="$(mktemp -d)"
