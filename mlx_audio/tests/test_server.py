@@ -655,6 +655,42 @@ def test_verbose_json_maps_incomplete_transcription_to_422(client, mock_model_pr
     }
 
 
+@pytest.mark.parametrize("response_format", ["text", "json", "verbose_json"])
+def test_buffered_transcription_maps_terminal_result_error_to_422(
+    client, mock_model_provider, response_format
+):
+    terminal_results = iter(
+        [
+            SimpleNamespace(text="hello ", is_final=False),
+            SimpleNamespace(
+                text="",
+                is_final=True,
+                complete=False,
+                finish_reason="length",
+                raw_text="hello [T:50]",
+                error_type="IncompleteTranscription",
+                error=(
+                    "Granite timestamps generation reached max_tokens=1 before EOS."
+                ),
+            ),
+        ]
+    )
+
+    response = _post_transcription(
+        client,
+        mock_model_provider,
+        terminal_results,
+        response_format=response_format,
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == {
+        "message": "Granite timestamps generation reached max_tokens=1 before EOS.",
+        "type": "IncompleteTranscription",
+        "partial_text": "hello [T:50]",
+    }
+
+
 # ---------------------------------------------------------------------------
 # WebSocket realtime streaming tests
 # ---------------------------------------------------------------------------

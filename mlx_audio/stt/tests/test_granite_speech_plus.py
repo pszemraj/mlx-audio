@@ -895,7 +895,34 @@ def test_stream_rich_generation_emits_terminal_incomplete_result(monkeypatch):
     assert final.finish_reason == "length"
     assert final.complete is False
     assert final.raw_text == "hello [T:50]"
+    assert final.error_type == "IncompleteTranscription"
     assert "max_tokens=1" in final.error
+    assert final.segments is None
+
+
+def test_stream_rich_generation_types_malformed_terminal_result(monkeypatch):
+    import mlx_audio.lm.generate as lm_generate
+
+    monkeypatch.setattr(
+        lm_generate,
+        "generate_step",
+        lambda **kwargs: iter([(10, None), (99, None)]),
+    )
+
+    results = list(
+        Model._stream_generate(
+            _generation_stub({10: "hello world [T:100]"}),
+            mx.zeros((1,)),
+            task="timestamps",
+        )
+    )
+    final = results[-1]
+
+    assert final.is_final
+    assert final.complete is False
+    assert final.raw_text == "hello world [T:100]"
+    assert final.error_type == "StructuredTranscriptError"
+    assert "exactly one word" in final.error
     assert final.segments is None
 
 

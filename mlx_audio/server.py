@@ -336,6 +336,7 @@ def _stt_completion_metadata(value, *, include_error: bool = False) -> dict:
         "raw_text": str,
     }
     if include_error:
+        expected_types["error_type"] = str
         expected_types["error"] = str
     metadata = {}
     for field, expected_type in expected_types.items():
@@ -343,6 +344,29 @@ def _stt_completion_metadata(value, *, include_error: bool = False) -> dict:
         if isinstance(field_value, expected_type):
             metadata[field] = field_value
     return metadata
+
+
+def _raise_for_terminal_stt_error(payload: dict, accumulated_text: str) -> None:
+    """Map a buffered terminal STT error to an HTTP validation response."""
+    error = payload.get("error")
+    if not error:
+        return
+
+    partial_text = payload.get("raw_text")
+    if not isinstance(partial_text, str):
+        partial_text = accumulated_text
+    error_type = payload.get("error_type")
+    if not isinstance(error_type, str) or not error_type:
+        error_type = "TranscriptionError"
+
+    raise HTTPException(
+        status_code=422,
+        detail={
+            "message": str(error),
+            "type": error_type,
+            "partial_text": partial_text,
+        },
+    )
 
 
 async def _preflight_stt_generation_request(payload: TranscriptionRequest) -> None:
@@ -1260,6 +1284,7 @@ async def stt_transcriptions(
             handle.cancel()
 
         full["text"] = accumulated
+        _raise_for_terminal_stt_error(full, accumulated)
 
         response_headers = {}
         if full.get("finish_reason") is not None:

@@ -353,6 +353,7 @@ class StreamingResult:
     finish_reason: Optional[str] = None
     complete: Optional[bool] = None
     raw_text: Optional[str] = None
+    error_type: Optional[str] = None
     error: Optional[str] = None
 
 
@@ -1263,6 +1264,7 @@ class Model(nn.Module):
         finish_reason = "stop" if hit_eos else "length"
         complete = hit_eos
         raw_text = full_text if not hit_eos else None
+        error_type = None
         error = None
         segments = None
 
@@ -1272,6 +1274,7 @@ class Model(nn.Module):
                 max_tokens=max_tokens,
                 partial_text=full_text,
             )
+            error_type = type(incomplete).__name__
             error = str(incomplete)
         elif task != "asr":
             try:
@@ -1279,6 +1282,7 @@ class Model(nn.Module):
             except StructuredTranscriptError as exc:
                 complete = False
                 raw_text = exc.raw_text
+                error_type = type(exc).__name__
                 error = str(exc)
 
         yield StreamingResult(
@@ -1292,6 +1296,7 @@ class Model(nn.Module):
             finish_reason=finish_reason,
             complete=complete,
             raw_text=raw_text,
+            error_type=error_type,
             error=error,
         )
 
