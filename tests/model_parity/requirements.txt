@@ -1,0 +1,6 @@
+# Exact test-only stack for deterministic cross-framework model parity.
+accelerate==1.14.0
+tokenizers==0.23.1
+torch==2.13.0
+torchaudio==2.11.0
+transformers==5.16.1

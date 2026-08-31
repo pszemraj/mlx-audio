@@ -6,7 +6,8 @@ layer 3, final and concatenated encoder outputs, Q-Former projection,
 multimodal embedding merge, tied output head, and first greedy token.
 
 ```bash
-pip install -e ".[all,dev,granite-parity]"
+python -m pip install -e ".[all,dev]" \
+  -r tests/model_parity/requirements.txt
 pytest -s tests/model_parity/test_granite_speech_plus.py
 ```
 
@@ -19,11 +20,14 @@ revision
 `1454e6e1e33845ca9280ff65f52cf1141ba6e6e2`, loads MLX weights with
 `strict=True`, compares reference/MLX first-token logits and greedy choice,
 renders all three task prompts, and requires speaker and timestamp markers from
-the tracked audio fixture. The parity extra also pins Accelerate 1.14.0 so the
-reference weights materialize directly on MPS instead of retaining a complete
-second CPU model copy during loading.
+the tracked audio fixture. The test-only requirements file pins Accelerate
+1.14.0 so the reference weights materialize directly on MPS instead of
+retaining a complete second CPU model copy during loading. These pins are not
+published as a model-specific package extra.
 
 ```bash
+python -m pip install -e ".[all,dev]" \
+  -r tests/model_parity/requirements.txt
 reference_dir="$(mktemp -d)"
 python -m pip install --no-deps --target "$reference_dir" \
   transformers==5.8.1 tokenizers==0.23.0rc0

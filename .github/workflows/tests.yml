@@ -81,7 +81,8 @@ jobs:
       - name: Install Granite parity stack
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[all,dev,granite-parity]"
+          python -m pip install -e ".[all,dev]" \
+            -r tests/model_parity/requirements.txt
 
       - name: Run Granite Speech Plus full-stack parity
         run: pytest -s tests/model_parity/test_granite_speech_plus.py

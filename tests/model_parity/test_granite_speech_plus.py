@@ -2,6 +2,7 @@
 
 import mlx.core as mx
 import numpy as np
+import tokenizers
 import torch
 import torchaudio
 import transformers
@@ -29,6 +30,7 @@ from mlx_audio.stt.models.granite_speech.granite_speech import Model
 EXPECTED_TORCH = "2.13.0"
 EXPECTED_TORCHAUDIO = "2.11.0"
 EXPECTED_TRANSFORMERS = "5.16.1"
+EXPECTED_TOKENIZERS = "0.23.1"
 
 
 def _base_version(version: str) -> str:
@@ -136,6 +138,7 @@ def test_reference_dependency_versions_are_exact():
     assert _base_version(torch.__version__) == EXPECTED_TORCH
     assert _base_version(torchaudio.__version__) == EXPECTED_TORCHAUDIO
     assert _base_version(transformers.__version__) == EXPECTED_TRANSFORMERS
+    assert _base_version(tokenizers.__version__) == EXPECTED_TOKENIZERS
 
 
 def test_granite_plus_full_stack_matches_transformers():

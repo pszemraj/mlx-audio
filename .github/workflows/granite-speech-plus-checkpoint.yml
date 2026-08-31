@@ -16,7 +16,8 @@ jobs:
       - name: Install exact parity stack
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[all,dev,granite-parity]"
+          python -m pip install -e ".[all,dev]" \
+            -r tests/model_parity/requirements.txt
 
       - name: Install working multi-window reference in isolation
         run: |
