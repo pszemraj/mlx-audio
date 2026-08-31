@@ -36,6 +36,7 @@ def test_parser_exposes_only_music_generation_controls() -> None:
     assert args.duration == 30
     assert args.steps == 20
     assert args.seed == 7
+    assert args.verbose is False
     assert str(args.output) == "song.wav"
 
     with pytest.raises(SystemExit):
@@ -119,5 +120,5 @@ def test_main_reads_lyrics_file(tmp_path) -> None:
         steps=30,
         seed=0,
         output_path=configure_parser().get_default("output"),
-        verbose=True,
+        verbose=False,
     )
